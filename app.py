@@ -54,10 +54,9 @@ def get_events():
         params={
             "active": "true",
             "closed": "false",
-            "limit": 500,
+            "limit": 100,
             "offset": 0,
-            "order": "volume_24hr",
-            "ascending": "false",
+           
         },
         timeout=20,
         headers={"User-Agent": "PolymarketSportsScout/0.1"},
