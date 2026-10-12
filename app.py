@@ -107,18 +107,29 @@ def safe_json(value, fallback):
     except (TypeError, ValueError):
         return fallback
 
+@st.cache_data(ttl=120, show_spinner=False)
 def get_events():
-    response = requests.get(
-        f"{GAMMA}/events",
-        params={"active": "true", "closed": "false", "limit": 100, "offset": 0},
-        timeout=20,
-        headers={"User-Agent": "PolymarketSportsScout/0.2"},
-    )
-    response.raise_for_status()
-    data = response.json()
-    if isinstance(data, dict):
-        data = data.get("data", data.get("events", []))
-    return data if isinstance(data, list) else []
+    """Scan several pages so sports markets aren't missed just because they rank below page one."""
+    collected = []
+    page_size = 100
+    max_pages = 5  # Up to 500 active events; kept bounded to avoid excessive API calls.
+    for page in range(max_pages):
+        response = requests.get(
+            f"{GAMMA}/events",
+            params={"active": "true", "closed": "false", "limit": page_size, "offset": page * page_size},
+            timeout=20,
+            headers={"User-Agent": "PolymarketSportsScout/0.3"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict):
+            data = data.get("data", data.get("events", []))
+        if not isinstance(data, list) or not data:
+            break
+        collected.extend(data)
+        if len(data) < page_size:
+            break
+    return collected
 
 def event_looks_sporty(event):
     tags = event.get("tags") or []
@@ -439,13 +450,27 @@ with st.sidebar:
     selected_sports = st.multiselect("Sports to model", list(ESPN_SPORTS.keys()), default=["NFL", "NBA", "MLB", "NHL"])
     days_back = st.select_slider("Recent results used for ratings", options=[7, 14, 21, 30], value=14)
     st.caption("Uses public ESPN scoreboard data and a basic Elo model. Coverage depends on ESPN schedules.")
-    telegram_enabled = st.checkbox("Enable Telegram price alerts", value=False)
+    telegram_enabled = st.checkbox("Enable Telegram alerts", value=False, help="Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in Streamlit secrets.")
+    alert_price_moves = st.checkbox("Alert on meaningful market price moves", value=True)
+    price_move_threshold = st.slider("Price-move alert threshold", 0.01, 0.20, 0.03, 0.01, format="%.2f")
+    alert_feed_changes = st.checkbox("Show alerts for new news/injury feed updates", value=True)
+    if st.button("↻ Refresh all data now", use_container_width=True):
+        st.cache_data.clear()
+        st.rerun()
 
 st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
+page_refresh_utc = datetime.now(timezone.utc)
+st.caption(f"Page refreshed: {page_refresh_utc.strftime('%Y-%m-%d %H:%M:%S UTC')} · Auto-refresh every {refresh_seconds}s while this page is open · cached sources may update less frequently.")
 conn = db_connect()
 st.session_state.best_bet_rows = []
+if "market_price_snapshot" not in st.session_state:
+    st.session_state.market_price_snapshot = {}
+if "scout_alerts" not in st.session_state:
+    st.session_state.scout_alerts = []
+if "feed_fingerprints" not in st.session_state:
+    st.session_state.feed_fingerprints = {}
 
-tab_market, tab_game, tab_model, tab_best, tab_news, tab_history = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "⭐ Best bet candidates", "🩹 News & injuries", "🗂️ Prediction tracking"])
+tab_market, tab_game, tab_model, tab_best, tab_moonshot, tab_betbuilder, tab_news, tab_history = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "⭐ Best bet candidates", "🌙 Moonshots", "🎯 Bet builder", "🩹 News & injuries", "🗂️ Prediction tracking"])
 
 with tab_market:
     try:
@@ -463,6 +488,37 @@ with tab_market:
     else:
         df["Price alert candidate"] = (df["Market price"] <= max_price) & (df["Liquidity ($)"] >= min_liquidity)
         candidates = df[df["Price alert candidate"]].copy()
+
+        # Compare the latest market snapshot with the prior app run. First run only establishes a baseline.
+        current_snapshot = {}
+        price_moves = []
+        for _, market_row in df.iterrows():
+            market_key = f"{market_row.get('URL', '')}|{market_row.get('Outcome', '')}"
+            current_price = float(market_row.get("Market price", 0) or 0)
+            current_snapshot[market_key] = {
+                "price": current_price,
+                "sport_event": str(market_row.get("Sport/event", "")),
+                "market": str(market_row.get("Market", "")),
+                "outcome": str(market_row.get("Outcome", "")),
+                "url": str(market_row.get("URL", "")),
+            }
+            previous = st.session_state.market_price_snapshot.get(market_key)
+            if previous and alert_price_moves:
+                delta = current_price - float(previous.get("price", current_price))
+                if abs(delta) >= float(price_move_threshold):
+                    price_moves.append({**current_snapshot[market_key], "previous_price": float(previous["price"]), "delta": delta})
+        st.session_state.market_price_snapshot = current_snapshot
+        if price_moves:
+            for move in price_moves[:15]:
+                alert_text = f"Market move: {move['sport_event']} · {move['outcome']} changed from ${move['previous_price']:.3f} to ${move['price']:.3f} ({move['delta']:+.3f}). Verify the market before acting."
+                st.session_state.scout_alerts.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "type": "Market move", "message": alert_text, "url": move["url"]})
+                if telegram_enabled:
+                    try:
+                        send_telegram(alert_text + (f"\n{move['url']}" if move["url"] else ""))
+                    except requests.RequestException as exc:
+                        st.warning(f"Telegram market-move alert failed: {exc}")
+            st.session_state.scout_alerts = st.session_state.scout_alerts[:50]
+
         search_col, sort_col = st.columns([3, 1])
         market_search = search_col.text_input("Find a team, event, or market", placeholder="Search for a team or matchup…", key="market_search")
         sort_choice = sort_col.selectbox("Sort markets by", ["24h volume", "Liquidity", "Lowest price"], key="market_sort")
@@ -501,6 +557,12 @@ with tab_market:
                             st.session_state.sent_alerts.add(key)
                     except requests.RequestException as exc:
                         st.warning(f"Telegram send failed: {exc}")
+
+        if alert_price_moves:
+            if price_moves:
+                st.warning(f"Detected {len(price_moves)} meaningful price move(s) since the previous app refresh. See the alerts panel below.")
+            else:
+                st.caption(f"Price-move monitoring is on (threshold ±{price_move_threshold:.0%}). First refresh establishes a baseline; changes are detected only while the app is open.")
 
 with tab_game:
     st.markdown('<div class="section-label">Game-day command center</div>', unsafe_allow_html=True)
@@ -692,6 +754,163 @@ with tab_best:
             show["Model minus market"] = show["Model minus market"].map(lambda x: f"{x:+.1%}")
             st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")})
 
+with tab_moonshot:
+    st.markdown('<div class="section-label">Long-shot research lab</div>', unsafe_allow_html=True)
+    st.subheader("🌙 Moonshot candidates")
+    st.caption("Looks for low-priced sports outcomes with large potential payouts. Low odds imply low chances; this tab ranks research candidates, not guaranteed wins. Model probabilities only appear when a likely matchup/outcome match exists, and those matches require manual verification.")
+
+    controls = st.columns(4)
+    with controls[0]:
+        moon_min = st.slider("Minimum market price", 0.01, 0.20, 0.02, 0.01, key="moon_min")
+    with controls[1]:
+        moon_max = st.slider("Maximum market price", 0.03, 0.35, 0.15, 0.01, key="moon_max")
+    with controls[2]:
+        moon_liquidity = st.number_input("Minimum liquidity ($)", min_value=0, value=100, step=50, key="moon_liquidity")
+    with controls[3]:
+        moon_stake = st.number_input("Hypothetical stake ($)", min_value=1.0, max_value=100.0, value=10.0, step=1.0, key="moon_stake")
+
+    if 'df' not in locals() or not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("No market data is available in this refresh. Check Market scanner and try again.")
+    elif moon_min > moon_max:
+        st.warning("Minimum price must be less than or equal to maximum price.")
+    else:
+        moon = df.copy()
+        moon["Market price"] = pd.to_numeric(moon["Market price"], errors="coerce")
+        moon["Liquidity ($)"] = pd.to_numeric(moon["Liquidity ($)"], errors="coerce").fillna(0)
+        moon = moon[(moon["Market price"] >= moon_min) & (moon["Market price"] <= moon_max) & (moon["Liquidity ($)"] >= moon_liquidity)].copy()
+        if market_scope == "Game markets only":
+            moon = moon[moon.apply(is_game_market, axis=1)]
+
+        # Only attach a model estimate where the existing heuristic matcher produced a plausible candidate.
+        model_rows = pd.DataFrame(st.session_state.get("best_bet_rows", []))
+        moon["Model probability"] = float("nan")
+        moon["Model edge"] = float("nan")
+        moon["Match confidence"] = "Market-only; no model match"
+        if not model_rows.empty and {"Market", "Outcome", "Model probability", "Market probability"}.issubset(model_rows.columns):
+            for idx, market_row in moon.iterrows():
+                same = model_rows[(model_rows["Market"].astype(str) == str(market_row["Market"])) & (model_rows["Outcome"].astype(str) == str(market_row["Outcome"]))]
+                if not same.empty:
+                    candidate = same.iloc[0]
+                    moon.at[idx, "Model probability"] = float(candidate["Model probability"])
+                    moon.at[idx, "Model edge"] = float(candidate["Model probability"]) - float(market_row["Market price"])
+                    moon.at[idx, "Match confidence"] = "Heuristic match — verify"
+
+        moon["Potential total return ($)"] = moon_stake / moon["Market price"]
+        moon["Potential profit ($)"] = moon["Potential total return ($)"] - moon_stake
+        moon["Implied chance"] = moon["Market price"]
+        moon["Model edge"] = pd.to_numeric(moon["Model edge"], errors="coerce")
+        moon["Model probability"] = pd.to_numeric(moon["Model probability"], errors="coerce")
+        moon["Ranking signal"] = moon.apply(lambda r: "Model edge" if pd.notna(r["Model edge"]) and r["Model edge"] > 0 else "Liquidity + price only", axis=1)
+        # Prefer verified-by-user model edges when available; otherwise show liquid markets, never label them as model-backed.
+        moon = moon.sort_values(["Model edge", "Liquidity ($)"], ascending=[False, False], na_position="last")
+        moon = moon.drop_duplicates(subset=["Market", "Outcome", "URL"]).head(40)
+
+        if moon.empty:
+            st.info("No markets fit these price and liquidity filters. Try a wider price range or lower liquidity minimum.")
+        else:
+            k1, k2, k3 = st.columns(3)
+            k1.metric("Long-shot outcomes found", f"{len(moon):,}")
+            k2.metric("Largest possible profit", f"${moon['Potential profit ($)'].max():,.2f}")
+            k3.metric("Model-matched candidates", f"{moon['Model probability'].notna().sum():,}")
+            st.warning("Potential payout is not the same as expected profit. A $10 position at a $0.05 price could return about $200 if it wins, but the market-implied chance is only 5%, and the entire stake can be lost. Don't treat market-only rows as model recommendations.")
+            view = moon[["Sport/event", "Market", "Outcome", "Market price", "Implied chance", "Model probability", "Model edge", "Liquidity ($)", "Potential total return ($)", "Potential profit ($)", "Ranking signal", "Match confidence", "URL"]].copy()
+            for col in ("Market price", "Implied chance", "Model probability", "Model edge"):
+                view[col] = view[col].map(lambda x: "—" if pd.isna(x) else (f"{x:+.1%}" if col == "Model edge" else f"{x:.1%}"))
+            for col in ("Liquidity ($)", "Potential total return ($)", "Potential profit ($)"):
+                view[col] = view[col].map(lambda x: f"${x:,.2f}")
+            st.dataframe(view, use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")})
+            st.caption("Moonshot ranking is exploratory. Historical hit rates are not yet calculated from a sufficiently large, settled dataset; model matches are heuristic, and current Elo estimates do not account for injuries or all relevant context.")
+            st.download_button("Download moonshot shortlist CSV", data=moon.to_csv(index=False).encode("utf-8"), file_name="moonshot_candidates.csv", mime="text/csv")
+
+
+with tab_betbuilder:
+    st.markdown('<div class="section-label">Stake & payout workspace</div>', unsafe_allow_html=True)
+    st.subheader("🎯 Bet builder — highest-probability picks + moonshots")
+    st.caption("Uses current Polymarket outcome prices and any available Elo estimates. Payouts are estimates before fees/slippage. Model matches are heuristic; verify the exact event and contract. No bet is placed by this app.")
+
+    amount_col, max_col, filter_col = st.columns([1.2, 1, 1.2])
+    with amount_col:
+        stake_amount = st.number_input("Hypothetical stake ($)", min_value=1.0, max_value=100.0, value=10.0, step=1.0, key="betbuilder_stake")
+    with max_col:
+        st.metric("Maximum allowed stake", "$100")
+    with filter_col:
+        min_ev_edge = st.slider("Minimum estimated edge", 0.00, 0.20, 0.03, 0.01, format="%.0f%%", key="betbuilder_edge")
+
+    best_data = pd.DataFrame(st.session_state.get("best_bet_rows", []))
+    if not best_data.empty:
+        for col in ("Model probability", "Market probability", "Model minus market"):
+            if col in best_data:
+                best_data[col] = pd.to_numeric(best_data[col], errors="coerce")
+        best_data = best_data.dropna(subset=["Model probability", "Market probability"])
+        best_data = best_data[(best_data["Market probability"] > 0) & (best_data["Market probability"] < 1)].copy()
+        best_data["Estimated edge"] = best_data["Model probability"] - best_data["Market probability"]
+        best_data["Break-even probability"] = best_data["Market probability"]
+        best_data["Potential return ($)"] = stake_amount / best_data["Market probability"]
+        best_data["Potential profit ($)"] = best_data["Potential return ($)"] - stake_amount
+        best_data["Estimated EV ($)"] = best_data["Model probability"] * best_data["Potential profit ($)"] - (1 - best_data["Model probability"]) * stake_amount
+        best_data = best_data[best_data["Estimated edge"] >= min_ev_edge].copy()
+        best_data = best_data.sort_values(["Model probability", "Estimated EV ($)"], ascending=False)
+
+    st.markdown("### Highest-probability model candidates")
+    if best_data.empty:
+        st.info("No model-matched candidates currently pass your edge filter. This is a valid result—don't force a pick. Return to Sports predictions and let the selected leagues load, then refresh.")
+    else:
+        st.caption("Ranked first by estimated win probability, then expected value. These are unvalidated Elo estimates and can be wrong.")
+        for _, pick in best_data.head(8).iterrows():
+            prob = float(pick["Model probability"])
+            market_p = float(pick["Market probability"])
+            edge = float(pick["Estimated edge"])
+            ev = float(pick["Estimated EV ($)"])
+            with st.container(border=True):
+                title = f"{pick.get('Team', 'Outcome')} · {pick.get('Matchup', pick.get('Market', 'Market'))}"
+                st.markdown(f"**{title}**")
+                st.caption(f"{pick.get('Sport', 'Sport')} · {pick.get('Market', '')} · {pick.get('Outcome', '')}")
+                x1, x2, x3, x4 = st.columns(4)
+                x1.metric("Model win estimate", f"{prob:.1%}")
+                x2.metric("Market implied", f"{market_p:.1%}")
+                x3.metric("Estimated edge", f"{edge:+.1%}")
+                x4.metric("Est. EV at stake", f"${ev:+.2f}")
+                st.progress(min(1.0, max(0.0, prob)))
+                st.markdown(f"At **${stake_amount:.2f}** stake: potential total return **${float(pick['Potential return ($)']):.2f}**, potential profit **${float(pick['Potential profit ($)']):.2f}** if it wins.")
+                url = pick.get("Review market", "")
+                if isinstance(url, str) and url.startswith("http"):
+                    st.markdown(f"[Open and verify contract ↗]({url})")
+
+    st.markdown("### Moonshots with the biggest payouts")
+    st.caption("Long shots are listed separately so large payouts aren't confused with high hit probability.")
+    moon_min_price = st.slider("Moonshot price floor", 0.01, 0.20, 0.02, 0.01, key="builder_moon_min")
+    moon_max_price = st.slider("Moonshot price ceiling", 0.03, 0.35, 0.15, 0.01, key="builder_moon_max")
+    if 'df' not in locals() or not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("Market data is unavailable in this run. Open Market scanner and refresh.")
+    elif moon_min_price > moon_max_price:
+        st.warning("Moonshot price floor must be less than or equal to its ceiling.")
+    else:
+        moon_builder = df.copy()
+        moon_builder["Market price"] = pd.to_numeric(moon_builder["Market price"], errors="coerce")
+        moon_builder["Liquidity ($)"] = pd.to_numeric(moon_builder["Liquidity ($)"], errors="coerce").fillna(0)
+        moon_builder = moon_builder[moon_builder["Market price"].between(moon_min_price, moon_max_price)].copy()
+        if market_scope == "Game markets only":
+            moon_builder = moon_builder[moon_builder.apply(is_game_market, axis=1)]
+        moon_builder["Market implied chance"] = moon_builder["Market price"]
+        moon_builder["Potential return ($)"] = stake_amount / moon_builder["Market price"]
+        moon_builder["Potential profit ($)"] = moon_builder["Potential return ($)"] - stake_amount
+        moon_builder["Break-even hit rate"] = moon_builder["Market price"]
+        moon_builder = moon_builder.sort_values(["Potential profit ($)", "Liquidity ($)"], ascending=[False, False]).drop_duplicates(subset=["Market", "Outcome", "URL"]).head(20)
+        if moon_builder.empty:
+            st.info("No current market outcomes fit this price range. Try widening the range.")
+        else:
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Moonshots found", f"{len(moon_builder)}")
+            m2.metric("Largest potential profit", f"${moon_builder['Potential profit ($)'].max():,.2f}")
+            m3.metric("Stake at risk", f"${stake_amount:.2f}")
+            st.dataframe(
+                moon_builder[["Sport/event", "Market", "Outcome", "Market price", "Market implied chance", "Break-even hit rate", "Potential return ($)", "Potential profit ($)", "Liquidity ($)", "URL"]],
+                use_container_width=True, hide_index=True, height=420,
+                column_config={"URL": st.column_config.LinkColumn("Verify market", display_text="Open ↗")}
+            )
+            st.download_button("Download bet builder shortlist CSV", data=moon_builder.to_csv(index=False).encode("utf-8"), file_name="bet_builder_shortlist.csv", mime="text/csv", key="download_betbuilder")
+            st.warning("Market-only moonshots are ranked by payout, not by validated likelihood. A market price is only the market-implied probability proxy; fees, spreads, liquidity and settlement rules can change realized returns. Never treat the displayed expected value as reliable until the model has been calibrated against a large out-of-sample history.")
+
 with tab_news:
     st.markdown('<div class="section-label">Availability & reporting</div>', unsafe_allow_html=True)
     st.subheader("Injury reports and recent sports news")
@@ -706,6 +925,19 @@ with tab_news:
             try:
                 news_payload = get_espn_feed(news_sport, "news")
                 news_items = extract_news_items(news_payload)
+                news_signature = json.dumps([(item.get("headline", ""), item.get("published", ""), item.get("url", "")) for item in news_items[:20]], sort_keys=True)
+                news_key = f"{news_sport}:news"
+                previous_signature = st.session_state.feed_fingerprints.get(news_key)
+                if previous_signature is not None and previous_signature != news_signature and alert_feed_changes:
+                    message = f"News feed updated for {news_sport}: new or changed headlines were detected."
+                    st.session_state.scout_alerts.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "type": "News update", "message": message, "url": ""})
+                    if telegram_enabled:
+                        try:
+                            send_telegram(message)
+                        except requests.RequestException as exc:
+                            st.warning(f"Telegram news alert failed: {exc}")
+                st.session_state.feed_fingerprints[news_key] = news_signature
+                st.caption(f"Feed checked by app: {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')} · cached for up to 30 minutes")
                 if not news_items:
                     st.info("No headlines were returned in the expected format for this league.")
                 for item in news_items[:12]:
@@ -724,6 +956,18 @@ with tab_news:
             try:
                 injury_payload = get_espn_feed(news_sport, "injuries")
                 injury_items = extract_injury_items(injury_payload)
+                injury_signature = json.dumps(injury_items, sort_keys=True, default=str)
+                injury_key = f"{news_sport}:injuries"
+                previous_signature = st.session_state.feed_fingerprints.get(injury_key)
+                if previous_signature is not None and previous_signature != injury_signature and alert_feed_changes:
+                    message = f"Injury feed updated for {news_sport}: the reported player availability list changed. Verify the individual report."
+                    st.session_state.scout_alerts.insert(0, {"time": datetime.now(timezone.utc).isoformat(), "type": "Injury update", "message": message, "url": ""})
+                    if telegram_enabled:
+                        try:
+                            send_telegram(message)
+                        except requests.RequestException as exc:
+                            st.warning(f"Telegram injury alert failed: {exc}")
+                st.session_state.feed_fingerprints[injury_key] = injury_signature
                 if not injury_items:
                     st.info("No injuries were returned in the expected format. This does not mean every player is healthy.")
                 else:
@@ -732,6 +976,22 @@ with tab_news:
                     st.download_button("Download injury report CSV", data=injury_df.to_csv(index=False).encode("utf-8"), file_name=f"{news_sport.lower().replace(' ', '_')}_injuries.csv", mime="text/csv")
             except requests.RequestException as exc:
                 st.warning(f"Injury feed unavailable for {news_sport}: {exc}")
+
+with st.expander("🔔 Recent change alerts", expanded=False):
+    st.caption("Alerts are detected only while this app session is active. Market snapshots refresh on the selected timer; ESPN news/injury feeds are cached for up to 30 minutes. This is not a background monitoring service.")
+    if st.session_state.scout_alerts:
+        alert_cols = st.columns([1, 5])
+        if alert_cols[0].button("Clear alerts"):
+            st.session_state.scout_alerts = []
+            st.rerun()
+        for alert in st.session_state.scout_alerts[:25]:
+            st.markdown(f"**{alert['type']}** · {str(alert['time']).replace('T', ' ')[:19]} UTC")
+            st.write(alert["message"])
+            if alert.get("url"):
+                st.markdown(f"[Open related market]({alert['url']})")
+            st.divider()
+    else:
+        st.info("No changes detected yet. The app needs at least one baseline refresh before it can detect price moves or feed changes.")
 
 with tab_history:
     st.markdown('<div class="section-label">Model accountability</div>', unsafe_allow_html=True)
