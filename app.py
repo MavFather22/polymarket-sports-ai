@@ -636,5 +636,3 @@ with tab_history:
 
 st.divider()
 st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete and are not yet used to change probabilities; no independent backtest; no automatic matching to Polymarket contracts. No automatic betting is performed.")
-app.py
-Displaying app.py.
