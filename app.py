@@ -1,4 +1,3 @@
-
 import json
 import math
 import os
@@ -38,26 +37,38 @@ st.set_page_config(page_title="Polymarket Sports Scout", page_icon="🏟️", la
 # Broadcast-style visual layer: Streamlit renders this directly in the app.
 st.markdown("""
 <style>
-.stApp { background: radial-gradient(ellipse at 12% 0%, rgba(0,214,170,.12), transparent 34%), radial-gradient(ellipse at 92% 8%, rgba(82,109,255,.16), transparent 30%), #070b13; }
-[data-testid="stHeader"] { background: rgba(7,11,19,.78); }
-[data-testid="stSidebar"] { background: linear-gradient(180deg,#101827,#080d16); border-right:1px solid rgba(133,159,190,.18); }
-.block-container { padding-top:1.35rem; padding-bottom:2rem; max-width:1600px; }
-.hero-panel { position:relative; overflow:hidden; padding:1.55rem 1.7rem; margin-bottom:1.1rem; border:1px solid rgba(107,240,211,.3); border-radius:22px; background:linear-gradient(115deg,rgba(17,35,48,.96),rgba(15,20,39,.94) 58%,rgba(37,25,61,.9)); box-shadow:0 18px 55px rgba(0,0,0,.28); }
-.hero-panel:after { content:""; position:absolute; width:280px; height:280px; right:-70px; top:-155px; border:1px solid rgba(98,255,218,.32); border-radius:50%; box-shadow:0 0 0 25px rgba(98,255,218,.035),0 0 0 55px rgba(98,255,218,.025); }
-.hero-kicker { color:#69f5d3; text-transform:uppercase; letter-spacing:.19em; font-size:.72rem; font-weight:800; }
-.hero-title { color:#f4f7ff; font-size:clamp(1.7rem,3.4vw,2.7rem); line-height:1.1; font-weight:850; margin:.35rem 0 .5rem; }
-.hero-sub { color:#a9b8cb; font-size:.96rem; max-width:780px; }
-.live-pill { display:inline-block; color:#07140f; background:#72f5c8; border-radius:999px; padding:.22rem .58rem; font-size:.7rem; font-weight:900; letter-spacing:.08em; margin-right:.45rem; }
-.section-label { color:#72f5c8; font-size:.73rem; font-weight:800; letter-spacing:.16em; text-transform:uppercase; margin:.25rem 0 .45rem; }
-div[data-testid="stMetric"] { background:linear-gradient(145deg,rgba(22,33,49,.9),rgba(12,18,29,.92)); border:1px solid rgba(139,164,192,.17); padding:.85rem 1rem; border-radius:15px; }
-div[data-testid="stMetricLabel"] { color:#9fb0c4; } div[data-testid="stMetricValue"] { color:#f4f7ff; }
-.stTabs [data-baseweb="tab-list"] { gap:.4rem; background:rgba(15,22,35,.82); padding:.35rem; border:1px solid rgba(139,164,192,.14); border-radius:14px; }
-.stTabs [data-baseweb="tab"] { border-radius:10px; padding:.65rem 1rem; } .stTabs [aria-selected="true"] { background:rgba(84,245,202,.13); }
-.matchup-card { background:linear-gradient(145deg,rgba(21,31,47,.98),rgba(11,17,28,.98)); border:1px solid rgba(128,153,183,.2); border-radius:16px; padding:1rem; margin:.25rem 0 .75rem; }
-.matchup-name { color:#f4f7ff; font-weight:800; font-size:1.02rem; } .matchup-meta { color:#92a6bc; font-size:.78rem; margin-top:.35rem; }
+:root { color-scheme: dark; }
+.stApp { background: radial-gradient(ellipse at 8% 0%, rgba(44,220,174,.13), transparent 32%), radial-gradient(ellipse at 95% 4%, rgba(89,105,255,.14), transparent 29%), #080c14; color:#edf4fc; }
+[data-testid="stHeader"] { background:rgba(8,12,20,.86); }
+[data-testid="stSidebar"] { background:linear-gradient(180deg,#111b2a,#090e17); border-right:1px solid rgba(140,166,197,.15); }
+[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3 { color:#eaf3ff; }
+.block-container { padding-top:1.25rem; padding-bottom:3rem; max-width:1680px; }
+.hero-panel { position:relative; overflow:hidden; padding:clamp(1.3rem,3vw,2.35rem); margin-bottom:1.15rem; border:1px solid rgba(107,240,211,.27); border-radius:24px; background:linear-gradient(115deg,rgba(17,39,49,.98),rgba(14,22,39,.97) 60%,rgba(32,27,58,.95)); box-shadow:0 18px 60px rgba(0,0,0,.25); }
+.hero-panel:after { content:""; position:absolute; width:310px; height:310px; right:-75px; top:-175px; border:1px solid rgba(98,255,218,.3); border-radius:50%; box-shadow:0 0 0 28px rgba(98,255,218,.035),0 0 0 60px rgba(98,255,218,.02); pointer-events:none; }
+.hero-kicker { color:#78f5d5; text-transform:uppercase; letter-spacing:.19em; font-size:.7rem; font-weight:850; }
+.hero-title { color:#f5f8ff; font-size:clamp(1.8rem,4vw,3.1rem); line-height:1.06; font-weight:900; letter-spacing:-.045em; margin:.48rem 0 .65rem; }
+.hero-sub { color:#b2c0d1; font-size:.96rem; line-height:1.6; max-width:790px; }
+.live-pill { display:inline-block; color:#07140f; background:#72f5c8; border-radius:999px; padding:.24rem .65rem; font-size:.68rem; font-weight:950; letter-spacing:.09em; margin-right:.45rem; }
+.section-label { color:#79f5d5; font-size:.7rem; font-weight:850; letter-spacing:.16em; text-transform:uppercase; margin:.3rem 0 .35rem; }
+.stMarkdown h1,.stMarkdown h2,.stMarkdown h3 { letter-spacing:-.025em; }
+.stMarkdown h2 { margin-top:.3rem; }
+div[data-testid="stMetric"] { background:linear-gradient(145deg,rgba(23,36,53,.95),rgba(12,19,30,.96)); border:1px solid rgba(139,164,192,.18); padding:1rem 1.05rem; border-radius:17px; box-shadow:0 8px 24px rgba(0,0,0,.12); }
+div[data-testid="stMetricLabel"] { color:#a7b8cc; font-size:.82rem; } div[data-testid="stMetricValue"] { color:#f5f8ff; font-weight:850; }
+.stTabs [data-baseweb="tab-list"] { gap:.4rem; background:rgba(14,22,35,.92); padding:.42rem; border:1px solid rgba(139,164,192,.15); border-radius:16px; }
+.stTabs [data-baseweb="tab"] { border-radius:11px; padding:.68rem 1rem; color:#aebed1; font-weight:700; }
+.stTabs [aria-selected="true"] { background:rgba(84,245,202,.13); color:#8ff7dc; }
+.stButton > button, .stDownloadButton > button { border-radius:11px; border:1px solid rgba(117,245,213,.3); font-weight:750; transition:all .15s ease; }
+.stButton > button[kind="primary"] { background:linear-gradient(110deg,#69efc7,#43d9b2); color:#06130f; border:0; }
+.stTextInput input,.stSelectbox div[data-baseweb="select"],.stNumberInput input,.stTextArea textarea { border-radius:10px; }
+[data-testid="stDataFrame"] { border:1px solid rgba(139,164,192,.2); border-radius:14px; overflow:hidden; }
+.matchup-card { background:linear-gradient(145deg,rgba(21,31,47,.98),rgba(11,17,28,.98)); border:1px solid rgba(128,153,183,.2); border-radius:17px; padding:1.05rem; margin:.25rem 0 .75rem; box-shadow:0 10px 26px rgba(0,0,0,.14); }
+.matchup-name { color:#f4f7ff; font-weight:850; font-size:1.03rem; } .matchup-meta { color:#92a6bc; font-size:.78rem; margin-top:.35rem; }
+div[data-testid="stAlert"] { border-radius:13px; }
+hr { border-color:rgba(139,164,192,.16); }
 footer { visibility:hidden; }
+@media (max-width: 800px) { .block-container { padding-left:1rem; padding-right:1rem; } .hero-panel { border-radius:18px; } }
 </style>
-<div class="hero-panel"><div class="hero-kicker">Independent sports intelligence · Research only</div><div class="hero-title">POLYMARKET <span style="color:#72f5c8">SPORTS SCOUT</span></div><div class="hero-sub"><span class="live-pill">SCOUT MODE</span> Market signals, matchup estimates, game-day news and prediction tracking in one dark broadcast-style workspace.</div></div>
+<div class="hero-panel"><div class="hero-kicker">Independent sports intelligence · Research only</div><div class="hero-title">POLYMARKET <span style="color:#72f5c8">SPORTS SCOUT</span></div><div class="hero-sub"><span class="live-pill">SCOUT MODE</span> Market signals, matchup estimates, game-day news and prediction tracking in one clean broadcast-style workspace.</div></div>
 """, unsafe_allow_html=True)
 st.caption("Personal sports research dashboard · Basic Elo estimates · No automatic betting")
 
@@ -404,8 +415,15 @@ with tab_market:
     else:
         df["Price alert candidate"] = (df["Market price"] <= max_price) & (df["Liquidity ($)"] >= min_liquidity)
         candidates = df[df["Price alert candidate"]].copy()
-        display_df = candidates if only_watchlist else df
-        display_df = display_df.sort_values(["24h volume ($)", "Liquidity ($)"], ascending=False)
+        search_col, sort_col = st.columns([3, 1])
+        market_search = search_col.text_input("Find a team, event, or market", placeholder="Search for a team or matchup…", key="market_search")
+        sort_choice = sort_col.selectbox("Sort markets by", ["24h volume", "Liquidity", "Lowest price"], key="market_sort")
+        display_df = candidates.copy() if only_watchlist else df.copy()
+        if market_search.strip():
+            needle = market_search.strip().casefold()
+            display_df = display_df[display_df[["Sport/event", "Market", "Outcome"]].fillna("").astype(str).apply(lambda col: col.str.casefold().str.contains(needle, regex=False)).any(axis=1)]
+        sort_map = {"24h volume": "24h volume ($)", "Liquidity": "Liquidity ($)", "Lowest price": "Market price"}
+        display_df = display_df.sort_values(sort_map[sort_choice], ascending=(sort_choice == "Lowest price"))
         m1, m2, m3 = st.columns(3)
         m1.metric("Sports outcome rows found", f"{len(df):,}")
         m2.metric("Price-alert candidates", f"{len(candidates):,}")
@@ -416,9 +434,11 @@ with tab_market:
         view["Implied probability"] = view["Implied probability"].map(lambda x: f"{x:.1%}")
         view["Liquidity ($)"] = view["Liquidity ($)"].map(lambda x: f"${x:,.0f}")
         view["24h volume ($)"] = view["24h volume ($)"].map(lambda x: f"${x:,.0f}")
+        st.caption(f"Showing {len(view):,} markets · Prices and liquidity are snapshots from the Polymarket API.")
         st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
-                     use_container_width=True, hide_index=True,
-                     column_config={"URL": st.column_config.LinkColumn("Open market", display_text="View on Polymarket")})
+                     use_container_width=True, hide_index=True, height=480, theme="dark",
+                     column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗"),
+                                    "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)})
         st.download_button("Download market scan CSV", data=df.to_csv(index=False).encode("utf-8"),
                            file_name="polymarket_sports_markets.csv", mime="text/csv")
         if telegram_enabled and not candidates.empty:
