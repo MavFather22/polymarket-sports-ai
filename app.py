@@ -1,18 +1,4 @@
-None selected 
 
-Skip to content
-Using Gmail with screen readers
-1 of 5,429
-app
-Inbox
-
-Maverick Whitfield <maverickwhit2@gmail.com>
-Attachments
-11:09 PM (0 minutes ago)
-to me
-
- One attachment
-  •  Scanned by Gmail
 import json
 import math
 import os
@@ -47,9 +33,33 @@ SPORT_WORDS = {
     "serie a", "bundesliga", "match winner"
 }
 
-st.set_page_config(page_title="Polymarket Sports Scout", page_icon="🏟️", layout="wide")
-st.title("🏟️ Polymarket Sports Scout")
-st.caption("Research dashboard with a basic Elo model and prediction tracking. Not financial advice.")
+st.set_page_config(page_title="Polymarket Sports Scout", page_icon="🏟️", layout="wide", initial_sidebar_state="expanded")
+
+# Broadcast-style visual layer: Streamlit renders this directly in the app.
+st.markdown("""
+<style>
+.stApp { background: radial-gradient(ellipse at 12% 0%, rgba(0,214,170,.12), transparent 34%), radial-gradient(ellipse at 92% 8%, rgba(82,109,255,.16), transparent 30%), #070b13; }
+[data-testid="stHeader"] { background: rgba(7,11,19,.78); }
+[data-testid="stSidebar"] { background: linear-gradient(180deg,#101827,#080d16); border-right:1px solid rgba(133,159,190,.18); }
+.block-container { padding-top:1.35rem; padding-bottom:2rem; max-width:1600px; }
+.hero-panel { position:relative; overflow:hidden; padding:1.55rem 1.7rem; margin-bottom:1.1rem; border:1px solid rgba(107,240,211,.3); border-radius:22px; background:linear-gradient(115deg,rgba(17,35,48,.96),rgba(15,20,39,.94) 58%,rgba(37,25,61,.9)); box-shadow:0 18px 55px rgba(0,0,0,.28); }
+.hero-panel:after { content:""; position:absolute; width:280px; height:280px; right:-70px; top:-155px; border:1px solid rgba(98,255,218,.32); border-radius:50%; box-shadow:0 0 0 25px rgba(98,255,218,.035),0 0 0 55px rgba(98,255,218,.025); }
+.hero-kicker { color:#69f5d3; text-transform:uppercase; letter-spacing:.19em; font-size:.72rem; font-weight:800; }
+.hero-title { color:#f4f7ff; font-size:clamp(1.7rem,3.4vw,2.7rem); line-height:1.1; font-weight:850; margin:.35rem 0 .5rem; }
+.hero-sub { color:#a9b8cb; font-size:.96rem; max-width:780px; }
+.live-pill { display:inline-block; color:#07140f; background:#72f5c8; border-radius:999px; padding:.22rem .58rem; font-size:.7rem; font-weight:900; letter-spacing:.08em; margin-right:.45rem; }
+.section-label { color:#72f5c8; font-size:.73rem; font-weight:800; letter-spacing:.16em; text-transform:uppercase; margin:.25rem 0 .45rem; }
+div[data-testid="stMetric"] { background:linear-gradient(145deg,rgba(22,33,49,.9),rgba(12,18,29,.92)); border:1px solid rgba(139,164,192,.17); padding:.85rem 1rem; border-radius:15px; }
+div[data-testid="stMetricLabel"] { color:#9fb0c4; } div[data-testid="stMetricValue"] { color:#f4f7ff; }
+.stTabs [data-baseweb="tab-list"] { gap:.4rem; background:rgba(15,22,35,.82); padding:.35rem; border:1px solid rgba(139,164,192,.14); border-radius:14px; }
+.stTabs [data-baseweb="tab"] { border-radius:10px; padding:.65rem 1rem; } .stTabs [aria-selected="true"] { background:rgba(84,245,202,.13); }
+.matchup-card { background:linear-gradient(145deg,rgba(21,31,47,.98),rgba(11,17,28,.98)); border:1px solid rgba(128,153,183,.2); border-radius:16px; padding:1rem; margin:.25rem 0 .75rem; }
+.matchup-name { color:#f4f7ff; font-weight:800; font-size:1.02rem; } .matchup-meta { color:#92a6bc; font-size:.78rem; margin-top:.35rem; }
+footer { visibility:hidden; }
+</style>
+<div class="hero-panel"><div class="hero-kicker">Independent sports intelligence · Research only</div><div class="hero-title">POLYMARKET <span style="color:#72f5c8">SPORTS SCOUT</span></div><div class="hero-sub"><span class="live-pill">SCOUT MODE</span> Market signals, matchup estimates, game-day news and prediction tracking in one dark broadcast-style workspace.</div></div>
+""", unsafe_allow_html=True)
+st.caption("Personal sports research dashboard · Basic Elo estimates · No automatic betting")
 
 def db_connect():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -378,7 +388,7 @@ with st.sidebar:
 st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
 conn = db_connect()
 
-tab_market, tab_model, tab_news, tab_history = st.tabs(["Market scanner", "Sports predictions", "News & injuries", "Prediction tracking"])
+tab_market, tab_game, tab_model, tab_news, tab_history = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "🩹 News & injuries", "🗂️ Prediction tracking"])
 
 with tab_market:
     try:
@@ -423,6 +433,53 @@ with tab_market:
                             st.session_state.sent_alerts.add(key)
                     except requests.RequestException as exc:
                         st.warning(f"Telegram send failed: {exc}")
+
+with tab_game:
+    st.markdown('<div class="section-label">Game-day command center</div>', unsafe_allow_html=True)
+    st.subheader("Scores, schedules and matchup pulse")
+    st.caption("Scoreboard information comes from ESPN's public endpoints. Coverage and update timing can vary by league.")
+    if not selected_sports:
+        st.info("Choose at least one sport in the sidebar to load its scoreboard.")
+    else:
+        game_sport = st.selectbox("League", selected_sports, key="game_center_sport")
+        try:
+            payload = espn_scoreboard(game_sport)
+            scoreboard_events = payload.get("events", [])
+            if not scoreboard_events:
+                st.info(f"ESPN returned no current or upcoming {game_sport} games. Try another league or check back later.")
+            else:
+                score_rows = []
+                for event in scoreboard_events:
+                    teams = get_competitors(event)
+                    if not teams:
+                        continue
+                    status_type = ((event.get("status") or {}).get("type") or {})
+                    competition = (event.get("competitions") or [{}])[0]
+                    start_raw = event.get("date", "")
+                    try:
+                        start_label = pd.to_datetime(start_raw, utc=True).strftime("%a %b %d · %I:%M %p UTC")
+                    except Exception:
+                        start_label = start_raw or "Start time unavailable"
+                    completed = bool(status_type.get("completed", False))
+                    state = "FINAL" if completed else status_type.get("detail") or status_type.get("description") or "UPCOMING"
+                    live_now = bool(status_type.get("state") == "in")
+                    score_rows.append((event, teams, state, start_label, live_now, completed, competition))
+                live_rows = [x for x in score_rows if x[4]]
+                upcoming_rows = [x for x in score_rows if not x[4] and not x[5]]
+                final_rows = [x for x in score_rows if x[5]]
+                a, b, c = st.columns(3)
+                a.metric("Live now", len(live_rows))
+                b.metric("Upcoming / in progress", len(upcoming_rows))
+                c.metric("Final scores listed", len(final_rows))
+                ordered = live_rows + upcoming_rows + final_rows
+                for event, teams, state, start_label, live_now, completed, competition in ordered[:18]:
+                    left, right = teams[0], teams[1]
+                    venue = (competition.get("venue") or {}).get("fullName", "")
+                    state_color = "#72f5c8" if live_now else "#9fb0c4"
+                    score_display = f"{int(left['score'])}  —  {int(right['score'])}" if completed or live_now else "VS"
+                    st.markdown(f'''<div class="matchup-card"><div style="display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap"><div class="matchup-name">{left['name']} <span style="color:#71849b">vs</span> {right['name']}</div><div style="color:{state_color};font-weight:900;font-size:.72rem;letter-spacing:.12em">{'🔴 ' if live_now else ''}{state.upper()}</div></div><div style="font-size:1.65rem;font-weight:850;letter-spacing:.05em;color:#f4f7ff;margin:.35rem 0">{score_display}</div><div class="matchup-meta">{start_label}{' · ' + venue if venue else ''}</div></div>''', unsafe_allow_html=True)
+        except requests.RequestException as exc:
+            st.warning(f"Could not load the ESPN scoreboard for {game_sport}: {exc}")
 
 with tab_model:
     st.subheader("Elo-based matchup estimates")
@@ -488,8 +545,58 @@ with tab_model:
                 except Exception as exc:
                     st.warning(f"Couldn't build {sport_name} predictions: {exc}")
 
+with tab_news:
+    st.markdown('<div class="section-label">Availability & reporting</div>', unsafe_allow_html=True)
+    st.subheader("Injury reports and recent sports news")
+    st.caption("These feeds are for context only. ESPN's public endpoints are undocumented and can change; reports may be incomplete or delayed.")
+    if not selected_sports:
+        st.info("Choose sports in the sidebar to see available feeds.")
+    else:
+        news_sport = st.selectbox("Sport feed", selected_sports, key="news_sport")
+        col_news, col_inj = st.columns(2)
+        with col_news:
+            st.markdown("#### 📰 Latest headlines")
+            try:
+                news_payload = get_espn_feed(news_sport, "news")
+                news_items = extract_news_items(news_payload)
+                if not news_items:
+                    st.info("No headlines were returned in the expected format for this league.")
+                for item in news_items[:12]:
+                    st.markdown(f"**{item['headline']}**")
+                    if item["description"]:
+                        st.write(item["description"][:450])
+                    if item["published"]:
+                        st.caption(str(item["published"]))
+                    if item["url"]:
+                        st.markdown(f"[Read report]({item['url']})")
+                    st.divider()
+            except requests.RequestException as exc:
+                st.warning(f"News feed unavailable right now: {exc}")
+        with col_inj:
+            st.markdown("#### 🩹 Injury report")
+            try:
+                injury_payload = get_espn_feed(news_sport, "injuries")
+                injury_items = extract_injury_items(injury_payload)
+                if not injury_items:
+                    st.info("No injuries were returned in the expected format. This does not mean every player is healthy.")
+                else:
+                    injury_df = pd.DataFrame(injury_items)
+                    st.dataframe(injury_df, use_container_width=True, hide_index=True)
+                    st.download_button("Download injury report CSV", data=injury_df.to_csv(index=False).encode("utf-8"), file_name=f"{news_sport.lower().replace(' ', '_')}_injuries.csv", mime="text/csv")
+            except requests.RequestException as exc:
+                st.warning(f"Injury feed unavailable for {news_sport}: {exc}")
+
 with tab_history:
+    st.markdown('<div class="section-label">Model accountability</div>', unsafe_allow_html=True)
     st.subheader("Prediction history and accuracy")
+    if st.button("🔄 Check completed games and update results from ESPN"):
+        with st.spinner("Checking saved predictions against ESPN scoreboards…"):
+            try:
+                updated_count, checked_count = sync_saved_results(conn)
+                st.success(f"Checked {checked_count} pending prediction(s); updated {updated_count} completed result(s).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Could not sync results: {exc}")
     history = pd.read_sql_query("SELECT * FROM predictions ORDER BY id DESC", conn)
     if history.empty:
         st.info("No predictions recorded yet. Go to Sports predictions and save one.")
@@ -528,6 +635,6 @@ with tab_history:
         st.warning("Important: Streamlit Community Cloud's local files may be reset when the app restarts or redeploys. Download your history CSV regularly; a persistent database can be added later.")
 
 st.divider()
-st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete; news is not yet used to change probabilities; no independent backtest yet; no automatic matching to Polymarket contracts. No automatic betting is performed.")
+st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete and are not yet used to change probabilities; no independent backtest; no automatic matching to Polymarket contracts. No automatic betting is performed.")
 app.py
-Displaying app.py. 
+Displaying app.py.
