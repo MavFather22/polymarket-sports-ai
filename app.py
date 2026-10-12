@@ -679,7 +679,7 @@ with tab_market:
         st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
                      use_container_width=True, hide_index=True, height=480,
                      column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗"),
-                                    "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)}, theme="dark")
+                                    "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)})
         st.download_button("Download market scan CSV", data=df.to_csv(index=False).encode("utf-8"),
                            file_name="polymarket_sports_markets.csv", mime="text/csv")
         if telegram_enabled and not candidates.empty:
@@ -757,7 +757,7 @@ with tab_game:
                     pulse_b.metric("Injury entries returned", len(pulse_injuries))
                     if pulse_injuries:
                         with st.expander("🩹 Availability watch", expanded=False):
-                            st.dataframe(pd.DataFrame(pulse_injuries).head(10), use_container_width=True, hide_index=True, theme="dark")
+                            st.dataframe(pd.DataFrame(pulse_injuries).head(10), use_container_width=True, hide_index=True)
                 except requests.RequestException:
                     pulse_b.metric("Injury entries returned", "Unavailable")
                 ordered = live_rows + upcoming_rows + final_rows
@@ -830,7 +830,7 @@ with tab_model:
                         edge_view = likely_edges.copy()
                         for col in ("Model probability", "Market probability", "Model minus market"):
                             edge_view[col] = edge_view[col].map(lambda x: f"{x:+.1%}" if col == "Model minus market" else f"{x:.1%}")
-                        st.dataframe(edge_view, use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")}, theme="dark")
+                        st.dataframe(edge_view, use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")})
                     save_choice = st.selectbox(f"Choose a matchup to record ({sport_name})",
                                                options=list(range(len(rows))),
                                                format_func=lambda i: rows[i]["Matchup"],
@@ -889,7 +889,7 @@ with tab_best:
             for col in ("Model probability", "Market probability"):
                 show[col] = show[col].map(lambda x: f"{x:.1%}")
             show["Model minus market"] = show["Model minus market"].map(lambda x: f"{x:+.1%}")
-            st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")}, theme="dark")
+            st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")})
 
 with tab_moonshot:
     st.markdown('<div class="section-label">Long-shot research lab</div>', unsafe_allow_html=True)
@@ -955,7 +955,7 @@ with tab_moonshot:
                 view[col] = view[col].map(lambda x: "—" if pd.isna(x) else (f"{x:+.1%}" if col == "Model edge" else f"{x:.1%}"))
             for col in ("Liquidity ($)", "Potential total return ($)", "Potential profit ($)"):
                 view[col] = view[col].map(lambda x: f"${x:,.2f}")
-            st.dataframe(view, use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")}, theme="dark")
+            st.dataframe(view, use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")})
             st.caption("Moonshot ranking is exploratory. Historical hit rates are not yet calculated from a sufficiently large, settled dataset; model matches are heuristic, and current Elo estimates do not account for injuries or all relevant context.")
             st.download_button("Download moonshot shortlist CSV", data=moon.to_csv(index=False).encode("utf-8"), file_name="moonshot_candidates.csv", mime="text/csv")
 
@@ -1044,7 +1044,7 @@ with tab_betbuilder:
                 moon_builder[["Sport/event", "Market", "Outcome", "Market price", "Market implied chance", "Break-even hit rate", "Potential return ($)", "Potential profit ($)", "Liquidity ($)", "URL"]],
                 use_container_width=True, hide_index=True, height=420,
                 column_config={"URL": st.column_config.LinkColumn("Verify market", display_text="Open ↗")}
-            , theme="dark")
+            )
             st.download_button("Download bet builder shortlist CSV", data=moon_builder.to_csv(index=False).encode("utf-8"), file_name="bet_builder_shortlist.csv", mime="text/csv", key="download_betbuilder")
             st.warning("Market-only moonshots are ranked by payout, not by validated likelihood. A market price is only the market-implied probability proxy; fees, spreads, liquidity and settlement rules can change realized returns. Never treat the displayed expected value as reliable until the model has been calibrated against a large out-of-sample history.")
 
@@ -1109,7 +1109,7 @@ with tab_news:
                     st.info("No injuries were returned in the expected format. This does not mean every player is healthy.")
                 else:
                     injury_df = pd.DataFrame(injury_items)
-                    st.dataframe(injury_df, use_container_width=True, hide_index=True, height=420, theme="dark")
+                    st.dataframe(injury_df, use_container_width=True, hide_index=True, height=420)
                     st.download_button("Download injury report CSV", data=injury_df.to_csv(index=False).encode("utf-8"), file_name=f"{news_sport.lower().replace(' ', '_')}_injuries.csv", mime="text/csv")
             except requests.RequestException as exc:
                 st.warning(f"Injury feed unavailable for {news_sport}: {exc}")
