@@ -209,32 +209,104 @@ def is_game_market(row):
     return any(term in text for term in game_terms)
 
 def team_tokens(name):
-    stop = {"the", "fc", "cf", "club", "university", "state", "of"}
-    return {t for t in str(name).casefold().replace(".", " ").replace("-", " ").split() if len(t) > 2 and t not in stop}
+    """Return distinctive tokens for conservative team-name comparisons."""
+    stop = {
+        "the", "fc", "cf", "club", "university", "state", "of", "at", "vs", "versus",
+        "los", "las", "new", "san", "st", "saint", "city", "united", "real",
+    }
+    return {
+        token for token in str(name).casefold().replace(".", " ").replace("-", " ").replace("'", " ").split()
+        if len(token) > 2 and token not in stop
+    }
+
+
+def team_name_matches(team, text):
+    """Require a distinctive team token, and most of the team's tokens, to match."""
+    wanted = team_tokens(team)
+    found = team_tokens(text)
+    if not wanted:
+        return False
+    overlap = wanted & found
+    # Single-token names (e.g. Bills, Rams) need an exact distinctive token.
+    return bool(overlap) and len(overlap) / len(wanted) >= 0.6
+
 
 def find_market_discrepancies(predictions, markets):
-    """Conservative name-based comparison; show only likely matches and label them for review."""
+    """Only compare markets when both teams and the market's named team match the same fixture.
+
+    This intentionally excludes futures (e.g. season champions) and uncertain matches rather
+    than generating impressive-looking but meaningless model edges.
+    """
     rows = []
     if markets.empty:
         return pd.DataFrame()
+
     for pred in predictions:
-        for side_key, prob_key in (("Team A", "Team A win probability"), ("Team B", "Team B win probability")):
-            team = pred[side_key]
-            tokens = team_tokens(team)
-            if not tokens:
+        team_a = str(pred.get("Team A", ""))
+        team_b = str(pred.get("Team B", ""))
+        if not team_a or not team_b:
+            continue
+        for _, market in markets.iterrows():
+            event_text = str(market.get("Sport/event", ""))
+            question = str(market.get("Market", ""))
+            outcome = str(market.get("Outcome", ""))
+            combined = f"{event_text} {question} {outcome}"
+
+            # Both predicted teams must be identifiable in the same market/event text.
+            if not team_name_matches(team_a, combined) or not team_name_matches(team_b, combined):
                 continue
-            candidates = markets[markets.apply(lambda r: bool(tokens & team_tokens(str(r.get("Outcome", "")) + " " + str(r.get("Market", "")) + " " + str(r.get("Sport/event", "")))), axis=1)]
-            if candidates.empty:
+            # The market question must concern one of these teams, not a generic future.
+            question_names_a = team_name_matches(team_a, question)
+            question_names_b = team_name_matches(team_b, question)
+            if not (question_names_a or question_names_b):
                 continue
-            for _, market in candidates.head(2).iterrows():
-                price = float(market["Market price"])
-                model_p = float(pred[prob_key])
-                edge = model_p - price
-                if abs(edge) >= 0.05:
-                    rows.append({"Sport": pred["Sport"], "Matchup": pred["Matchup"], "Team": team, "Model probability": model_p, "Market probability": price, "Model minus market": edge, "Market": market["Market"], "Outcome": market["Outcome"], "Review market": market["URL"]})
+
+            try:
+                market_price = float(market["Market price"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not 0 < market_price < 1:
+                continue
+
+            # Yes/No contracts are interpreted against the team named in the question.
+            if question_names_a and not question_names_b:
+                named_team, team_prob = team_a, float(pred["Team A win probability"])
+            elif question_names_b and not question_names_a:
+                named_team, team_prob = team_b, float(pred["Team B win probability"])
+            else:
+                # Ambiguous questions are deliberately not scored.
+                continue
+
+            outcome_norm = outcome.casefold().strip()
+            if outcome_norm in {"yes", "true"}:
+                model_probability = team_prob
+            elif outcome_norm in {"no", "false"}:
+                model_probability = 1.0 - team_prob
+            elif team_name_matches(named_team, outcome):
+                model_probability = team_prob
+            else:
+                # Never map a model probability onto an unrelated outcome label.
+                continue
+
+            edge = model_probability - market_price
+            if abs(edge) >= 0.05:
+                rows.append({
+                    "Sport": pred.get("Sport", ""),
+                    "Matchup": pred.get("Matchup", f"{team_a} vs {team_b}"),
+                    "Team": named_team,
+                    "Model probability": model_probability,
+                    "Market probability": market_price,
+                    "Model minus market": edge,
+                    "Market": question,
+                    "Outcome": outcome,
+                    "Review market": market.get("URL", ""),
+                })
+
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).drop_duplicates(subset=["Matchup", "Team", "Market", "Outcome"]).sort_values("Model minus market", ascending=False)
+    return pd.DataFrame(rows).drop_duplicates(
+        subset=["Matchup", "Team", "Market", "Outcome"]
+    ).sort_values("Model minus market", ascending=False)
 
 def flatten_events(events):
     rows = []
@@ -782,7 +854,7 @@ with tab_model:
 with tab_best:
     st.markdown('<div class="section-label">Model-versus-market shortlist</div>', unsafe_allow_html=True)
     st.subheader("Best bet candidates")
-    st.caption("Ranks possible price disagreements for research. Not a guarantee or betting advice. Team/contract matches are heuristic and must be verified manually.")
+    st.caption("Only markets where both teams and the named contract outcome match the same fixture are considered. Ambiguous matches and season futures are excluded.")
     candidates = pd.DataFrame(st.session_state.get("best_bet_rows", []))
     if candidates.empty:
         st.info("No likely model/market matches with at least a 5 percentage-point difference were found in the current scan. Open Sports predictions and wait for selected leagues to load, then revisit this tab.")
@@ -802,7 +874,7 @@ with tab_best:
             c3.metric("Top model probability", f"{top['Model probability']:.1%}")
             st.markdown(f"**Top candidate: {top['Team']} — {top['Matchup']}**")
             st.markdown(f"Market outcome: **{top['Outcome']}** · Market price: **{top['Market probability']:.1%}** · Elo estimate: **{top['Model probability']:.1%}** · Estimated difference: **+{top['Model minus market']:.1%}**")
-            st.warning("This shortlist can contain false matches because it uses team-name text similarity. Confirm the exact event, outcome, and contract rules. Elo does not yet incorporate injuries, news, odds movement, or a validated backtest.")
+            st.warning("Matching is deliberately conservative but is not a substitute for checking the contract. Elo is an unvalidated baseline and does not incorporate injuries, news, odds movement, or a proper backtest.")
             show = candidates.copy()
             for col in ("Model probability", "Market probability"):
                 show[col] = show[col].map(lambda x: f"{x:.1%}")
@@ -881,7 +953,7 @@ with tab_moonshot:
 with tab_betbuilder:
     st.markdown('<div class="section-label">Stake & payout workspace</div>', unsafe_allow_html=True)
     st.subheader("🎯 Bet builder — highest-probability picks + moonshots")
-    st.caption("Uses current Polymarket outcome prices and any available Elo estimates. Payouts are estimates before fees/slippage. Model matches are heuristic; verify the exact event and contract. No bet is placed by this app.")
+    st.caption("Uses current Polymarket prices. Model picks appear only when both teams and the named outcome match the same fixture; uncertain matches are excluded. Payouts exclude fees/slippage. No bet is placed by this app.")
 
     amount_col, max_col, filter_col = st.columns([1.2, 1, 1.2])
     with amount_col:
@@ -908,7 +980,7 @@ with tab_betbuilder:
 
     st.markdown("### Highest-probability model candidates")
     if best_data.empty:
-        st.info("No model-matched candidates currently pass your edge filter. This is a valid result—don't force a pick. Return to Sports predictions and let the selected leagues load, then refresh.")
+        st.info("No confidently matched model candidates pass this filter. This is safer than showing a false edge; futures and ambiguous team/event matches are excluded.")
     else:
         st.caption("Ranked first by estimated win probability, then expected value. These are unvalidated Elo estimates and can be wrong.")
         for _, pick in best_data.head(8).iterrows():
