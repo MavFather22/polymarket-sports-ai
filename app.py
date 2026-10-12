@@ -35,6 +35,22 @@ SPORT_WORDS = {
 st.set_page_config(page_title="Polymarket Sports Scout", page_icon="🏟️", layout="wide", initial_sidebar_state="expanded")
 
 # Broadcast-style visual layer: Streamlit renders this directly in the app.
+def dark_table(frame):
+    """Apply explicit dark cell styling so dataframe cells match the app theme."""
+    return frame.style.set_properties(
+        **{
+            "background-color": "#101a2a",
+            "color": "#edf4fc",
+            "border-color": "#2a3a50",
+            "font-size": "0.88rem",
+        }
+    ).set_table_styles([
+        {"selector": "thead th", "props": [("background-color", "#17263a"), ("color", "#f4f8ff"), ("font-weight", "800"), ("border-color", "#34445b")]},
+        {"selector": "tbody tr:hover td", "props": [("background-color", "#183044"), ("color", "#ffffff")]},
+        {"selector": "tbody td", "props": [("border-color", "#2a3a50")]},
+        {"selector": "table", "props": [("background-color", "#101a2a"), ("color", "#edf4fc")]},
+    ])
+
 st.markdown("""
 <style>
 :root { color-scheme: dark; }
@@ -75,7 +91,12 @@ div[data-testid="stMetricLabel"] { color:#a7b8cc; font-size:.82rem; } div[data-t
 .stSelectbox [data-baseweb="select"] { background:#111b2a !important; }
 div[data-baseweb="popover"] ul, div[data-baseweb="menu"] { background:#111b2a !important; }
 div[data-baseweb="popover"] li, div[data-baseweb="menu"] li { color:#edf4fc !important; }
-[data-testid="stDataFrame"] [data-testid="glideDataEditor"] { background:#0e1725 !important; }
+[data-testid="stDataFrame"], [data-testid="stDataFrame"] > div, [data-testid="stDataFrame"] [data-testid="glideDataEditor"] { background:#0e1725 !important; color:#edf4fc !important; }
+[data-testid="stDataFrame"] canvas { background-color:#0e1725 !important; }
+[data-testid="stDataFrame"] [role="columnheader"] { color:#f4f8ff !important; }
+[data-testid="stTable"] table { background:#101a2a !important; color:#edf4fc !important; }
+[data-testid="stTable"] th { background:#17263a !important; color:#f4f8ff !important; }
+[data-testid="stTable"] td { background:#101a2a !important; color:#edf4fc !important; border-color:#2a3a50 !important; }
 .matchup-card { background:linear-gradient(145deg,rgba(21,31,47,.98),rgba(11,17,28,.98)); border:1px solid rgba(128,153,183,.2); border-radius:17px; padding:1.05rem; margin:.25rem 0 .75rem; box-shadow:0 10px 26px rgba(0,0,0,.14); }
 .matchup-name { color:#f4f7ff; font-weight:850; font-size:1.03rem; } .matchup-meta { color:#92a6bc; font-size:.78rem; margin-top:.35rem; }
 div[data-testid="stAlert"] { border-radius:13px; }
@@ -208,69 +229,102 @@ def event_looks_sporty(event):
     )
 
 
-NON_GAME_TERMS = {"ballon d'or", "ballon dor", "mvp", "rookie of the year", "player of the year", "coach of the year", "award", "awards", "draft", "hall of fame", "top scorer", "golden boot", "most valuable player", "cy young", "heisman", "advance to", "reach the", "win the 20", "champion of the", "league phase", "most clean sheets", "most assists", "most goals", "finish with the best", "round of 16", "round of 32", "semifinal", "semi-final", "quarterfinal", "quarter-final", "to win the title", "season winner"}
+NON_GAME_TERMS = {
+    "ballon d'or", "ballon dor", "mvp", "rookie of the year", "player of the year",
+    "coach of the year", "award", "awards", "draft", "hall of fame", "top scorer",
+    "golden boot", "most valuable player", "cy young", "heisman", "advance to",
+    "reach the", "win the 20", "champion of the", "league phase", "most clean sheets",
+    "most assists", "most goals", "finish with the best", "round of 16", "round of 32",
+    "semifinal", "semi-final", "quarterfinal", "quarter-final", "to win the title",
+    "season winner", "player prop", "player props", "exact score", "correct score",
+    "first half", "1st half", "first quarter", "1st quarter", "first period",
+}
+
+NON_WINNER_MARKET_TERMS = (
+    "spread", "handicap", "over/under", "total points", "total goals", "player prop",
+    "player props", "exact score", "correct score", "first half", "1st half",
+    "first quarter", "1st quarter", "first period", "most assists", "most goals",
+)
+
 
 def is_game_market(row):
-    text = f"{row.get('Sport/event','')} {row.get('Market','')}".casefold()
+    """Keep fixture-level markets; exclude futures, props, and non-winner bet types."""
+    event = str(row.get("Sport/event", ""))
+    question = str(row.get("Market", ""))
+    text = f"{event} {question}".casefold()
     if any(term in text for term in NON_GAME_TERMS):
         return False
-    # Keep likely event-level markets; avoid generic futures and season-long awards.
-    game_terms = (" vs ", " at ", "winner", "win on", "beat", "spread", "total points", "over/under", "moneyline", "match winner", "matchup", "fixture")
+    # Include common head-to-head fixtures and winner/moneyline markets.
+    game_terms = (" vs ", " vs. ", " at ", "winner", "moneyline", "match winner", "to win", "win on")
     return any(term in text for term in game_terms)
+
 
 def team_tokens(name):
     """Return distinctive tokens for conservative team-name comparisons."""
     stop = {
         "the", "fc", "cf", "club", "university", "state", "of", "at", "vs", "versus",
-        "los", "las", "new", "san", "st", "saint", "city", "united", "real",
+        "los", "las", "new", "san", "st", "saint", "city", "united", "real", "team",
     }
-    return {
-        token for token in str(name).casefold().replace(".", " ").replace("-", " ").replace("'", " ").split()
-        if len(token) > 2 and token not in stop
-    }
+    raw = str(name).casefold().replace(".", " ").replace("-", " ").replace("'", " ").replace("&", " and ").split()
+    return {token for token in raw if len(token) > 2 and token not in stop}
 
 
 def team_name_matches(team, text):
-    """Require a distinctive team token, and most of the team's tokens, to match."""
+    """Match distinctive team words; aliases are handled before the token comparison."""
+    import re
+    normalized = re.sub(r"[^a-z0-9]+", " ", str(text).casefold()).strip()
+    normalized_team = re.sub(r"[^a-z0-9]+", " ", str(team).casefold()).strip()
+    # Common short forms used in sports schedules and market titles.
+    aliases = {
+        "los angeles": ("la",), "new york": ("ny",), "san francisco": ("sf",),
+        "tampa bay": ("tampa",), "new england": ("ne",), "green bay": ("gb",),
+        "kansas city": ("kc",), "las vegas": ("lv",),
+    }
+    for full, shorts in aliases.items():
+        if full in normalized_team:
+            for short in shorts:
+                if re.search(rf"\b{re.escape(short)}\b", normalized):
+                    # The alias alone is insufficient for common short forms; require a mascot token too.
+                    mascot = team_tokens(str(team)) - {"los", "angeles", "new", "york", "san", "francisco", "tampa", "bay", "green", "packers", "kansas", "city", "las", "vegas", "england"}
+                    if mascot and any(re.search(rf"\b{re.escape(tok)}\b", normalized) for tok in mascot):
+                        return True
     wanted = team_tokens(team)
-    found = team_tokens(text)
+    found = team_tokens(normalized)
     if not wanted:
         return False
     overlap = wanted & found
-    # Single-token names (e.g. Bills, Rams) need an exact distinctive token.
     return bool(overlap) and len(overlap) / len(wanted) >= 0.6
 
 
 def find_market_discrepancies(predictions, markets):
-    """Only compare markets when both teams and the market's named team match the same fixture.
-
-    This intentionally excludes futures (e.g. season champions) and uncertain matches rather
-    than generating impressive-looking but meaningless model edges.
-    """
+    """Compare only identifiable head-to-head winner contracts; never score props/spreads/futures."""
     rows = []
     if markets.empty:
         return pd.DataFrame()
 
     for pred in predictions:
-        team_a = str(pred.get("Team A", ""))
-        team_b = str(pred.get("Team B", ""))
+        team_a = str(pred.get("Team A", "")).strip()
+        team_b = str(pred.get("Team B", "")).strip()
         if not team_a or not team_b:
             continue
         for _, market in markets.iterrows():
             event_text = str(market.get("Sport/event", ""))
             question = str(market.get("Market", ""))
             outcome = str(market.get("Outcome", ""))
-            combined = f"{event_text} {question} {outcome}"
-
-            # Both predicted teams must be identifiable in the same market/event text.
-            if not team_name_matches(team_a, combined) or not team_name_matches(team_b, combined):
+            question_norm = question.casefold()
+            if any(term in question_norm for term in NON_WINNER_MARKET_TERMS):
                 continue
-            # The market question must concern one of these teams, not a generic future.
+            # The market must be a game winner / moneyline-style question, not just a game-related market.
+            winner_like = any(term in question_norm for term in ("winner", "moneyline", "to win", "win on", "will "))
+            if not winner_like:
+                continue
+            # Require both teams in the event title itself; don't use a generic question/outcome to invent a fixture match.
+            if not team_name_matches(team_a, event_text) or not team_name_matches(team_b, event_text):
+                continue
             question_names_a = team_name_matches(team_a, question)
             question_names_b = team_name_matches(team_b, question)
-            if not (question_names_a or question_names_b):
+            if question_names_a == question_names_b:
                 continue
-
             try:
                 market_price = float(market["Market price"])
             except (KeyError, TypeError, ValueError):
@@ -278,14 +332,12 @@ def find_market_discrepancies(predictions, markets):
             if not 0 < market_price < 1:
                 continue
 
-            # Yes/No contracts are interpreted against the team named in the question.
-            if question_names_a and not question_names_b:
-                named_team, team_prob = team_a, float(pred["Team A win probability"])
-            elif question_names_b and not question_names_a:
-                named_team, team_prob = team_b, float(pred["Team B win probability"])
+            if question_names_a:
+                named_team = team_a
+                team_prob = float(pred.get("Team A win probability", 0.5))
             else:
-                # Ambiguous questions are deliberately not scored.
-                continue
+                named_team = team_b
+                team_prob = float(pred.get("Team B win probability", 0.5))
 
             outcome_norm = outcome.casefold().strip()
             if outcome_norm in {"yes", "true"}:
@@ -295,28 +347,20 @@ def find_market_discrepancies(predictions, markets):
             elif team_name_matches(named_team, outcome):
                 model_probability = team_prob
             else:
-                # Never map a model probability onto an unrelated outcome label.
                 continue
 
             edge = model_probability - market_price
             if abs(edge) >= 0.05:
                 rows.append({
-                    "Sport": pred.get("Sport", ""),
-                    "Matchup": pred.get("Matchup", f"{team_a} vs {team_b}"),
-                    "Team": named_team,
-                    "Model probability": model_probability,
-                    "Market probability": market_price,
-                    "Model minus market": edge,
-                    "Market": question,
-                    "Outcome": outcome,
-                    "Review market": market.get("URL", ""),
+                    "Sport": pred.get("Sport", ""), "Matchup": pred.get("Matchup", f"{team_a} vs {team_b}"),
+                    "Team": named_team, "Model probability": model_probability,
+                    "Market probability": market_price, "Model minus market": edge,
+                    "Market": question, "Outcome": outcome, "Review market": market.get("URL", ""),
                 })
 
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(rows).drop_duplicates(
-        subset=["Matchup", "Team", "Market", "Outcome"]
-    ).sort_values("Model minus market", ascending=False)
+    return pd.DataFrame(rows).drop_duplicates(subset=["Matchup", "Team", "Market", "Outcome"]).sort_values("Model minus market", ascending=False)
 
 def flatten_events(events):
     rows = []
@@ -676,7 +720,7 @@ with tab_market:
         view["Liquidity ($)"] = view["Liquidity ($)"].map(lambda x: f"${x:,.0f}")
         view["24h volume ($)"] = view["24h volume ($)"].map(lambda x: f"${x:,.0f}")
         st.caption(f"Showing {len(view):,} markets · Prices and liquidity are snapshots from the Polymarket API.")
-        st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
+        st.dataframe(dark_table(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]]),
                      use_container_width=True, hide_index=True, height=480,
                      column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗"),
                                     "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)})
@@ -757,7 +801,7 @@ with tab_game:
                     pulse_b.metric("Injury entries returned", len(pulse_injuries))
                     if pulse_injuries:
                         with st.expander("🩹 Availability watch", expanded=False):
-                            st.dataframe(pd.DataFrame(pulse_injuries).head(10), use_container_width=True, hide_index=True)
+                            st.dataframe(dark_table(pd.DataFrame(pulse_injuries).head(10)), use_container_width=True, hide_index=True)
                 except requests.RequestException:
                     pulse_b.metric("Injury entries returned", "Unavailable")
                 ordered = live_rows + upcoming_rows + final_rows
@@ -830,7 +874,7 @@ with tab_model:
                         edge_view = likely_edges.copy()
                         for col in ("Model probability", "Market probability", "Model minus market"):
                             edge_view[col] = edge_view[col].map(lambda x: f"{x:+.1%}" if col == "Model minus market" else f"{x:.1%}")
-                        st.dataframe(edge_view, use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")})
+                        st.dataframe(dark_table(edge_view), use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")})
                     save_choice = st.selectbox(f"Choose a matchup to record ({sport_name})",
                                                options=list(range(len(rows))),
                                                format_func=lambda i: rows[i]["Matchup"],
@@ -867,7 +911,7 @@ with tab_best:
     st.caption("Only markets where both teams and the named contract outcome match the same fixture are considered. Ambiguous matches and season futures are excluded.")
     candidates = pd.DataFrame(st.session_state.get("best_bet_rows", []))
     if candidates.empty:
-        st.info("No confident matches passed the safety checks in this refresh. Common reasons: the market is a season future/player prop, the event title does not identify both teams, or the market question does not clearly name one side. This is preferable to showing a false edge. Check that upcoming fixtures appear in Sports predictions and that Market scanner is set to Game markets only.")
+        st.info("No confident winner-market matches passed the safety checks in this refresh. The shortlist intentionally excludes player props, spreads, totals, exact scores, and season futures because this basic Elo model only estimates full-game win probability. Confirm upcoming fixtures appear in Sports predictions and that Polymarket has a matching head-to-head winner market.")
     else:
         candidates["Model minus market"] = pd.to_numeric(candidates["Model minus market"], errors="coerce")
         candidates["Model probability"] = pd.to_numeric(candidates["Model probability"], errors="coerce")
@@ -889,7 +933,7 @@ with tab_best:
             for col in ("Model probability", "Market probability"):
                 show[col] = show[col].map(lambda x: f"{x:.1%}")
             show["Model minus market"] = show["Model minus market"].map(lambda x: f"{x:+.1%}")
-            st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")})
+            st.dataframe(dark_table(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]]), use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")})
 
 with tab_moonshot:
     st.markdown('<div class="section-label">Long-shot research lab</div>', unsafe_allow_html=True)
@@ -955,7 +999,7 @@ with tab_moonshot:
                 view[col] = view[col].map(lambda x: "—" if pd.isna(x) else (f"{x:+.1%}" if col == "Model edge" else f"{x:.1%}"))
             for col in ("Liquidity ($)", "Potential total return ($)", "Potential profit ($)"):
                 view[col] = view[col].map(lambda x: f"${x:,.2f}")
-            st.dataframe(view, use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")})
+            st.dataframe(dark_table(view), use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")})
             st.caption("Moonshot ranking is exploratory. Historical hit rates are not yet calculated from a sufficiently large, settled dataset; model matches are heuristic, and current Elo estimates do not account for injuries or all relevant context.")
             st.download_button("Download moonshot shortlist CSV", data=moon.to_csv(index=False).encode("utf-8"), file_name="moonshot_candidates.csv", mime="text/csv")
 
@@ -1041,7 +1085,7 @@ with tab_betbuilder:
             m2.metric("Largest potential profit", f"${moon_builder['Potential profit ($)'].max():,.2f}")
             m3.metric("Stake at risk", f"${stake_amount:.2f}")
             st.dataframe(
-                moon_builder[["Sport/event", "Market", "Outcome", "Market price", "Market implied chance", "Break-even hit rate", "Potential return ($)", "Potential profit ($)", "Liquidity ($)", "URL"]],
+                dark_table(moon_builder[["Sport/event", "Market", "Outcome", "Market price", "Market implied chance", "Break-even hit rate", "Potential return ($)", "Potential profit ($)", "Liquidity ($)", "URL"]]),
                 use_container_width=True, hide_index=True, height=420,
                 column_config={"URL": st.column_config.LinkColumn("Verify market", display_text="Open ↗")}
             )
@@ -1109,7 +1153,7 @@ with tab_news:
                     st.info("No injuries were returned in the expected format. This does not mean every player is healthy.")
                 else:
                     injury_df = pd.DataFrame(injury_items)
-                    st.dataframe(injury_df, use_container_width=True, hide_index=True, height=420)
+                    st.dataframe(dark_table(injury_df), use_container_width=True, hide_index=True, height=420)
                     st.download_button("Download injury report CSV", data=injury_df.to_csv(index=False).encode("utf-8"), file_name=f"{news_sport.lower().replace(' ', '_')}_injuries.csv", mime="text/csv")
             except requests.RequestException as exc:
                 st.warning(f"Injury feed unavailable for {news_sport}: {exc}")
