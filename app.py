@@ -436,7 +436,7 @@ with tab_market:
         view["24h volume ($)"] = view["24h volume ($)"].map(lambda x: f"${x:,.0f}")
         st.caption(f"Showing {len(view):,} markets · Prices and liquidity are snapshots from the Polymarket API.")
         st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
-                     use_container_width=True, hide_index=True, height=480, theme="dark",
+                     use_container_width=True, hide_index=True, height=480, 
                      column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗"),
                                     "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)})
         st.download_button("Download market scan CSV", data=df.to_csv(index=False).encode("utf-8"),
