@@ -59,7 +59,12 @@ div[data-testid="stMetricLabel"] { color:#a7b8cc; font-size:.82rem; } div[data-t
 .stTabs [aria-selected="true"] { background:rgba(84,245,202,.13); color:#8ff7dc; }
 .stButton > button, .stDownloadButton > button { border-radius:11px; border:1px solid rgba(117,245,213,.3); font-weight:750; transition:all .15s ease; }
 .stButton > button[kind="primary"] { background:linear-gradient(110deg,#69efc7,#43d9b2); color:#06130f; border:0; }
-.stTextInput input,.stSelectbox div[data-baseweb="select"],.stNumberInput input,.stTextArea textarea { border-radius:10px; }
+.stTextInput input,.stSelectbox div[data-baseweb="select"],.stNumberInput input,.stTextArea textarea { border-radius:10px; background-color:#111b2a !important; color:#edf4fc !important; border-color:#34445b !important; }
+.stSelectbox [data-baseweb="select"] *,.stMultiSelect [data-baseweb="select"] * { color:#edf4fc !important; }
+.stMultiSelect [data-baseweb="tag"] { background:#174a42 !important; color:#dffff5 !important; border:1px solid #3d9e86 !important; }
+.stRadio label,.stCheckbox label,.stSlider label,.stSelectbox label,.stTextInput label,.stMultiSelect label { color:#d5e0ed !important; }
+.stTabs [data-baseweb="tab-list"] { flex-wrap:wrap; }
+
 [data-testid="stDataFrame"] { border:1px solid rgba(139,164,192,.2); border-radius:14px; overflow:hidden; }
 .matchup-card { background:linear-gradient(145deg,rgba(21,31,47,.98),rgba(11,17,28,.98)); border:1px solid rgba(128,153,183,.2); border-radius:17px; padding:1.05rem; margin:.25rem 0 .75rem; box-shadow:0 10px 26px rgba(0,0,0,.14); }
 .matchup-name { color:#f4f7ff; font-weight:850; font-size:1.03rem; } .matchup-meta { color:#92a6bc; font-size:.78rem; margin-top:.35rem; }
@@ -125,6 +130,45 @@ def event_looks_sporty(event):
     return any(word in tag_text for word in ("sport", "nfl", "nba", "mlb", "nhl", "soccer", "tennis", "ufc")) or any(
         word in title for word in SPORT_WORDS
     )
+
+
+NON_GAME_TERMS = {"ballon d'or", "ballon dor", "mvp", "rookie of the year", "player of the year", "coach of the year", "award", "awards", "draft", "hall of fame", "top scorer", "golden boot", "most valuable player", "cy young", "heisman"}
+
+def is_game_market(row):
+    text = f"{row.get('Sport/event','')} {row.get('Market','')}".casefold()
+    if any(term in text for term in NON_GAME_TERMS):
+        return False
+    # Keep likely event-level markets; avoid generic futures and season-long awards.
+    game_terms = (" vs ", " at ", "winner", "win on", "beat", "spread", "total points", "over/under", "moneyline", "match", "game", "champions league", " vs.")
+    return any(term in text for term in game_terms)
+
+def team_tokens(name):
+    stop = {"the", "fc", "cf", "club", "university", "state", "of"}
+    return {t for t in str(name).casefold().replace(".", " ").replace("-", " ").split() if len(t) > 2 and t not in stop}
+
+def find_market_discrepancies(predictions, markets):
+    """Conservative name-based comparison; show only likely matches and label them for review."""
+    rows = []
+    if markets.empty:
+        return pd.DataFrame()
+    for pred in predictions:
+        for side_key, prob_key in (("Team A", "Team A win probability"), ("Team B", "Team B win probability")):
+            team = pred[side_key]
+            tokens = team_tokens(team)
+            if not tokens:
+                continue
+            candidates = markets[markets.apply(lambda r: bool(tokens & team_tokens(str(r.get("Outcome", "")) + " " + str(r.get("Market", "")) + " " + str(r.get("Sport/event", "")))), axis=1)]
+            if candidates.empty:
+                continue
+            for _, market in candidates.head(2).iterrows():
+                price = float(market["Market price"])
+                model_p = float(pred[prob_key])
+                edge = model_p - price
+                if abs(edge) >= 0.05:
+                    rows.append({"Sport": pred["Sport"], "Matchup": pred["Matchup"], "Team": team, "Model probability": model_p, "Market probability": price, "Model minus market": edge, "Market": market["Market"], "Outcome": market["Outcome"], "Review market": market["URL"]})
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).drop_duplicates(subset=["Matchup", "Team", "Market", "Outcome"]).sort_values("Model minus market", ascending=False)
 
 def flatten_events(events):
     rows = []
@@ -389,6 +433,7 @@ with st.sidebar:
     min_liquidity = st.number_input("Minimum listed liquidity ($)", min_value=0, value=100, step=50)
     max_price = st.slider("Watch outcomes priced at or below", 0.01, 0.99, 0.40, 0.01)
     only_watchlist = st.checkbox("Show only price-alert candidates", value=False)
+    market_scope = st.radio("Market type", ["Game markets only", "All sports-related markets"], index=0, help="Game markets filters out awards and season-long futures.")
     st.divider()
     st.subheader("Prediction engine")
     selected_sports = st.multiselect("Sports to model", list(ESPN_SPORTS.keys()), default=["NFL", "NBA", "MLB", "NHL"])
@@ -398,14 +443,17 @@ with st.sidebar:
 
 st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
 conn = db_connect()
+st.session_state.best_bet_rows = []
 
-tab_market, tab_game, tab_model, tab_news, tab_history = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "🩹 News & injuries", "🗂️ Prediction tracking"])
+tab_market, tab_game, tab_model, tab_best, tab_news, tab_history = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "⭐ Best bet candidates", "🩹 News & injuries", "🗂️ Prediction tracking"])
 
 with tab_market:
     try:
         with st.spinner("Loading Polymarket markets…"):
             events = get_events()
             df = flatten_events(events)
+            if not df.empty and market_scope == "Game markets only":
+                df = df[df.apply(is_game_market, axis=1)].copy()
     except requests.RequestException as exc:
         st.error(f"Could not load Polymarket data: {exc}")
         df = pd.DataFrame()
@@ -428,7 +476,7 @@ with tab_market:
         m1.metric("Sports outcome rows found", f"{len(df):,}")
         m2.metric("Price-alert candidates", f"{len(candidates):,}")
         m3.metric("Events scanned", f"{len(events):,}")
-        st.info("A low price is not proof of value. Model probabilities appear in the Sports predictions tab for ESPN-listed matchups; they are not automatically matched to Polymarket markets.")
+        st.info("A low price is not proof of value. Potential model/market differences are shown only when a likely team-name match is found; always verify the contract manually.")
         view = display_df.copy()
         view["Market price"] = view["Market price"].map(lambda x: f"${x:.3f}")
         view["Implied probability"] = view["Implied probability"].map(lambda x: f"{x:.1%}")
@@ -436,7 +484,7 @@ with tab_market:
         view["24h volume ($)"] = view["24h volume ($)"].map(lambda x: f"${x:,.0f}")
         st.caption(f"Showing {len(view):,} markets · Prices and liquidity are snapshots from the Polymarket API.")
         st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
-                     use_container_width=True, hide_index=True, height=480, 
+                     use_container_width=True, hide_index=True, height=480,
                      column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗"),
                                     "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)})
         st.download_button("Download market scan CSV", data=df.to_csv(index=False).encode("utf-8"),
@@ -465,6 +513,7 @@ with tab_game:
         try:
             payload = espn_scoreboard(game_sport)
             scoreboard_events = payload.get("events", [])
+            status_filter = st.radio("Show games", ["All", "Live", "Upcoming", "Final"], horizontal=True, key="game_status_filter")
             if not scoreboard_events:
                 st.info(f"ESPN returned no current or upcoming {game_sport} games. Try another league or check back later.")
             else:
@@ -491,8 +540,33 @@ with tab_game:
                 a.metric("Live now", len(live_rows))
                 b.metric("Upcoming / in progress", len(upcoming_rows))
                 c.metric("Final scores listed", len(final_rows))
+                # Quick availability/news pulse; feed failures never block the scoreboard.
+                pulse_a, pulse_b = st.columns(2)
+                try:
+                    pulse_news = extract_news_items(get_espn_feed(game_sport, "news"))
+                    pulse_a.metric("Recent headlines", len(pulse_news))
+                    if pulse_news:
+                        with st.expander("📰 Latest news pulse", expanded=False):
+                            for headline in pulse_news[:3]:
+                                st.markdown(f"**{headline['headline']}**")
+                                if headline.get("url"):
+                                    st.markdown(f"[Read report]({headline['url']})")
+                except requests.RequestException:
+                    pulse_a.metric("Recent headlines", "Unavailable")
+                try:
+                    pulse_injuries = extract_injury_items(get_espn_feed(game_sport, "injuries"))
+                    pulse_b.metric("Injury entries returned", len(pulse_injuries))
+                    if pulse_injuries:
+                        with st.expander("🩹 Availability watch", expanded=False):
+                            st.dataframe(pd.DataFrame(pulse_injuries).head(10), use_container_width=True, hide_index=True)
+                except requests.RequestException:
+                    pulse_b.metric("Injury entries returned", "Unavailable")
                 ordered = live_rows + upcoming_rows + final_rows
-                for event, teams, state, start_label, live_now, completed, competition in ordered[:18]:
+                if status_filter == "Live": ordered = live_rows
+                elif status_filter == "Upcoming": ordered = upcoming_rows
+                elif status_filter == "Final": ordered = final_rows
+                st.caption("Times are shown in UTC. ESPN public feeds can occasionally omit or delay events.")
+                for event, teams, state, start_label, live_now, completed, competition in ordered[:24]:
                     left, right = teams[0], teams[1]
                     venue = (competition.get("venue") or {}).get("fullName", "")
                     state_color = "#72f5c8" if live_now else "#9fb0c4"
@@ -531,11 +605,33 @@ with tab_model:
                             "Start": game["date"], "Status": game["status"],
                         })
                     pred_df = pd.DataFrame(rows)
-                    pretty = pred_df.copy()
-                    pretty["Team A win probability"] = pretty["Team A win probability"].map(lambda x: f"{x:.1%}")
-                    pretty["Team B win probability"] = pretty["Team B win probability"].map(lambda x: f"{x:.1%}")
-                    st.dataframe(pretty[["Matchup", "Team A Elo", "Team B Elo", "Team A win probability", "Team B win probability", "Start", "Status"]],
-                                 use_container_width=True, hide_index=True)
+                    st.markdown("#### Matchup board")
+                    for prediction in rows[:12]:
+                        pa = float(prediction["Team A win probability"])
+                        pb = float(prediction["Team B win probability"])
+                        try:
+                            start_text = pd.to_datetime(prediction["Start"], utc=True).strftime("%a %b %d · %I:%M %p UTC")
+                        except Exception:
+                            start_text = str(prediction["Start"] or "Start time unavailable")
+                        st.markdown(f"**{prediction['Team A']}**  ·  Elo {prediction['Team A Elo']}  ·  **{pa:.1%}**")
+                        st.progress(min(1.0, max(0.0, pa)))
+                        st.markdown(f"**{prediction['Team B']}**  ·  Elo {prediction['Team B Elo']}  ·  **{pb:.1%}**")
+                        st.progress(min(1.0, max(0.0, pb)))
+                        st.caption(f"{prediction['Matchup']} · {start_text} · {prediction['Status']}")
+                        st.divider()
+                    # Candidate market differences are suggestions only; contract identity is not guaranteed.
+                    likely_edges = find_market_discrepancies(rows, df if 'df' in globals() else pd.DataFrame())
+                    if not likely_edges.empty:
+                        cached = likely_edges.copy()
+                        cached["Sport"] = sport_name
+                        st.session_state.best_bet_rows.extend(cached.to_dict("records"))
+                    if not likely_edges.empty:
+                        st.markdown("#### Possible model / market differences")
+                        st.warning("These are heuristic name matches, not verified contract matches. Open each market and confirm the exact event and outcome before drawing conclusions.")
+                        edge_view = likely_edges.copy()
+                        for col in ("Model probability", "Market probability", "Model minus market"):
+                            edge_view[col] = edge_view[col].map(lambda x: f"{x:+.1%}" if col == "Model minus market" else f"{x:.1%}")
+                        st.dataframe(edge_view, use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")})
                     save_choice = st.selectbox(f"Choose a matchup to record ({sport_name})",
                                                options=list(range(len(rows))),
                                                format_func=lambda i: rows[i]["Matchup"],
@@ -565,10 +661,41 @@ with tab_model:
                 except Exception as exc:
                     st.warning(f"Couldn't build {sport_name} predictions: {exc}")
 
+
+with tab_best:
+    st.markdown('<div class="section-label">Model-versus-market shortlist</div>', unsafe_allow_html=True)
+    st.subheader("Best bet candidates")
+    st.caption("Ranks possible price disagreements for research. Not a guarantee or betting advice. Team/contract matches are heuristic and must be verified manually.")
+    candidates = pd.DataFrame(st.session_state.get("best_bet_rows", []))
+    if candidates.empty:
+        st.info("No likely model/market matches with at least a 5 percentage-point difference were found in the current scan. Open Sports predictions and wait for selected leagues to load, then revisit this tab.")
+    else:
+        candidates["Model minus market"] = pd.to_numeric(candidates["Model minus market"], errors="coerce")
+        candidates["Model probability"] = pd.to_numeric(candidates["Model probability"], errors="coerce")
+        candidates["Market probability"] = pd.to_numeric(candidates["Market probability"], errors="coerce")
+        candidates = candidates[(candidates["Model minus market"] >= 0.05) & candidates["Market probability"].between(0.03, 0.97)].copy()
+        candidates = candidates.sort_values("Model minus market", ascending=False).drop_duplicates(subset=["Matchup", "Team", "Market", "Outcome"])
+        if candidates.empty:
+            st.info("No positive model edges passed the shortlist filters. Don't force a pick.")
+        else:
+            top = candidates.iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Positive-edge candidates", f"{len(candidates):,}")
+            c2.metric("Largest estimated edge", f"{top['Model minus market']:.1%}")
+            c3.metric("Top model probability", f"{top['Model probability']:.1%}")
+            st.markdown(f"**Top candidate: {top['Team']} — {top['Matchup']}**")
+            st.markdown(f"Market outcome: **{top['Outcome']}** · Market price: **{top['Market probability']:.1%}** · Elo estimate: **{top['Model probability']:.1%}** · Estimated difference: **+{top['Model minus market']:.1%}**")
+            st.warning("This shortlist can contain false matches because it uses team-name text similarity. Confirm the exact event, outcome, and contract rules. Elo does not yet incorporate injuries, news, odds movement, or a validated backtest.")
+            show = candidates.copy()
+            for col in ("Model probability", "Market probability"):
+                show[col] = show[col].map(lambda x: f"{x:.1%}")
+            show["Model minus market"] = show["Model minus market"].map(lambda x: f"{x:+.1%}")
+            st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")})
+
 with tab_news:
     st.markdown('<div class="section-label">Availability & reporting</div>', unsafe_allow_html=True)
     st.subheader("Injury reports and recent sports news")
-    st.caption("These feeds are for context only. ESPN's public endpoints are undocumented and can change; reports may be incomplete or delayed.")
+    st.caption("Context only: public ESPN feeds are undocumented and can change. Injury/news items are not automatically weighted into Elo probabilities.")
     if not selected_sports:
         st.info("Choose sports in the sidebar to see available feeds.")
     else:
@@ -593,7 +720,7 @@ with tab_news:
             except requests.RequestException as exc:
                 st.warning(f"News feed unavailable right now: {exc}")
         with col_inj:
-            st.markdown("#### 🩹 Injury report")
+            st.markdown("#### 🩹 Injury report & availability signals")
             try:
                 injury_payload = get_espn_feed(news_sport, "injuries")
                 injury_items = extract_injury_items(injury_payload)
@@ -601,7 +728,7 @@ with tab_news:
                     st.info("No injuries were returned in the expected format. This does not mean every player is healthy.")
                 else:
                     injury_df = pd.DataFrame(injury_items)
-                    st.dataframe(injury_df, use_container_width=True, hide_index=True)
+                    st.dataframe(injury_df, use_container_width=True, hide_index=True, height=420)
                     st.download_button("Download injury report CSV", data=injury_df.to_csv(index=False).encode("utf-8"), file_name=f"{news_sport.lower().replace(' ', '_')}_injuries.csv", mime="text/csv")
             except requests.RequestException as exc:
                 st.warning(f"Injury feed unavailable for {news_sport}: {exc}")
@@ -655,4 +782,4 @@ with tab_history:
         st.warning("Important: Streamlit Community Cloud's local files may be reset when the app restarts or redeploys. Download your history CSV regularly; a persistent database can be added later.")
 
 st.divider()
-st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete and are not yet used to change probabilities; no independent backtest; no automatic matching to Polymarket contracts. No automatic betting is performed.")
+st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete and do not change probabilities; possible market matches are heuristic and require manual verification; no independent backtest. No automatic betting is performed.")
