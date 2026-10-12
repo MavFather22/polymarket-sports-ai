@@ -128,6 +128,44 @@ def db_connect():
     conn.commit()
     return conn
 
+def init_paper_tables(conn):
+    """Create local paper-trading and audit tables. This never connects to a wallet."""
+    conn.execute("""CREATE TABLE IF NOT EXISTS paper_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        opened_utc TEXT NOT NULL,
+        market_key TEXT NOT NULL,
+        sport_event TEXT NOT NULL,
+        market TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        url TEXT,
+        entry_price REAL NOT NULL,
+        stake REAL NOT NULL,
+        shares REAL NOT NULL,
+        model_probability REAL,
+        entry_edge REAL,
+        status TEXT NOT NULL DEFAULT 'OPEN',
+        closed_utc TEXT,
+        exit_price REAL,
+        realized_pnl REAL
+    )""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS paper_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_utc TEXT NOT NULL,
+        action TEXT NOT NULL,
+        position_id INTEGER,
+        details TEXT NOT NULL
+    )""")
+    conn.commit()
+
+
+def paper_audit(conn, action, position_id, details):
+    conn.execute(
+        "INSERT INTO paper_audit(created_utc, action, position_id, details) VALUES (?, ?, ?, ?)",
+        (datetime.now(timezone.utc).isoformat(), action, position_id, json.dumps(details, default=str)),
+    )
+    conn.commit()
+
+
 def safe_json(value, fallback):
     if isinstance(value, (list, dict)):
         return value
@@ -297,10 +335,29 @@ def team_name_matches(team, text):
 
 
 def find_market_discrepancies(predictions, markets):
-    """Compare only identifiable head-to-head winner contracts; never score props/spreads/futures."""
+    """Compare Elo full-game probabilities only with clearly identified full-game winner markets.
+
+    Conservative by design: if the contract wording is ambiguous or appears to refer
+    to an inning/quarter/period/set/round, player prop, futures market, or other subgame
+    outcome, it is excluded instead of presented as a betting edge.
+    """
     rows = []
     if markets.empty:
         return pd.DataFrame()
+
+    subgame_or_future_terms = (
+        "inning", "innings", "quarter", "period", "first half", "1st half",
+        "second half", "2nd half", "half-time", "halftime", "set ", "sets ",
+        "round ", "rounds ", "first to", "race to", "next goal", "next team to score",
+        "first team to score", "first scorer", "opening drive", "first drive",
+        "first touchdown", "first basket", "first goal", "first point", "first map",
+        "map winner", "player prop", "player props", "spread", "handicap",
+        "over/under", "total points", "total goals", "exact score", "correct score",
+        "mvp", "rookie of the year", "champion", "championship", "playoffs",
+        "division", "conference", "qualify", "advance", "season", "award",
+        "win the title", "win the cup", "win the league", "finish in", "top scorer",
+    )
+    winner_phrases = ("match winner", "game winner", "moneyline", "to win", "will win", "win on")
 
     for pred in predictions:
         team_a = str(pred.get("Team A", "")).strip()
@@ -311,33 +368,39 @@ def find_market_discrepancies(predictions, markets):
             event_text = str(market.get("Sport/event", ""))
             question = str(market.get("Market", ""))
             outcome = str(market.get("Outcome", ""))
-            question_norm = question.casefold()
-            if any(term in question_norm for term in NON_WINNER_MARKET_TERMS):
+            question_norm = question.casefold().strip()
+            combined = f"{event_text} {question}".casefold()
+
+            # Do not let a full-game Elo estimate score subgame contracts or futures.
+            if any(term in question_norm for term in subgame_or_future_terms):
                 continue
-            # The market must be a game winner / moneyline-style question, not just a game-related market.
-            winner_like = any(term in question_norm for term in ("winner", "moneyline", "to win", "win on", "will "))
-            if not winner_like:
+            if not any(phrase in question_norm for phrase in winner_phrases):
                 continue
-            # Require both teams in the event title itself; don't use a generic question/outcome to invent a fixture match.
+            # The event title must identify the same two teams, not merely one team
+            # appearing somewhere in a generic league or future-market description.
             if not team_name_matches(team_a, event_text) or not team_name_matches(team_b, event_text):
                 continue
+
             question_names_a = team_name_matches(team_a, question)
             question_names_b = team_name_matches(team_b, question)
+            # Contract wording must identify exactly one side. If neither or both are
+            # named, don't infer what Yes/No means from the event title alone.
             if question_names_a == question_names_b:
                 continue
             try:
                 market_price = float(market["Market price"])
             except (KeyError, TypeError, ValueError):
                 continue
-            if not 0 < market_price < 1:
+            if not 0.02 <= market_price <= 0.98:
                 continue
 
-            if question_names_a:
-                named_team = team_a
-                team_prob = float(pred.get("Team A win probability", 0.5))
-            else:
-                named_team = team_b
-                team_prob = float(pred.get("Team B win probability", 0.5))
+            named_team = team_a if question_names_a else team_b
+            try:
+                team_prob = float(pred.get("Team A win probability", 0.5) if question_names_a else pred.get("Team B win probability", 0.5))
+            except (TypeError, ValueError):
+                continue
+            if not 0.0 < team_prob < 1.0:
+                continue
 
             outcome_norm = outcome.casefold().strip()
             if outcome_norm in {"yes", "true"}:
@@ -643,6 +706,7 @@ st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
 page_refresh_utc = datetime.now(timezone.utc)
 st.caption(f"Page refreshed: {page_refresh_utc.strftime('%Y-%m-%d %H:%M:%S UTC')} · Auto-refresh every {refresh_seconds}s while this page is open · cached sources may update less frequently.")
 conn = db_connect()
+init_paper_tables(conn)
 st.session_state.best_bet_rows = []
 if "market_price_snapshot" not in st.session_state:
     st.session_state.market_price_snapshot = {}
@@ -651,7 +715,7 @@ if "scout_alerts" not in st.session_state:
 if "feed_fingerprints" not in st.session_state:
     st.session_state.feed_fingerprints = {}
 
-tab_market, tab_game, tab_model, tab_best, tab_moonshot, tab_betbuilder, tab_news, tab_history = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "⭐ Best bet candidates", "🌙 Moonshots", "🎯 Bet builder", "🩹 News & injuries", "🗂️ Prediction tracking"])
+tab_market, tab_game, tab_model, tab_best, tab_moonshot, tab_betbuilder, tab_news, tab_history, tab_paper = st.tabs(["📊 Market scanner", "🏟️ Game center", "🧠 Sports predictions", "⭐ Best bet candidates", "🌙 Moonshots", "🎯 Bet builder", "🩹 News & injuries", "🗂️ Prediction tracking", "🧪 Paper trading"])
 
 with tab_market:
     try:
@@ -1222,5 +1286,131 @@ with tab_history:
                            file_name="prediction_history.csv", mime="text/csv")
         st.warning("Important: Streamlit Community Cloud's local files may be reset when the app restarts or redeploys. Download your history CSV regularly; a persistent database can be added later.")
 
+with tab_paper:
+    st.markdown('<div class="section-label">Simulation only · No wallet connection</div>', unsafe_allow_html=True)
+    st.subheader("🧪 Paper trading & risk controls")
+    st.warning("SIMULATION ONLY — this tab does not place real orders, connect to a wallet, or guarantee that records survive Streamlit Cloud restarts. The model is not validated for profitable trading.")
+    st.caption("Selected first stage: manually confirm simulated entries, keep a $10 maximum daily paper stake, track open positions, record every action, and review exit signals. No live execution is enabled.")
+
+    risk_col1, risk_col2, risk_col3 = st.columns(3)
+    with risk_col1:
+        daily_cap = st.number_input("Daily paper stake cap ($)", min_value=1.0, max_value=10.0, value=10.0, step=1.0, key="paper_daily_cap")
+    with risk_col2:
+        per_trade_cap = st.number_input("Maximum per paper entry ($)", min_value=1.0, max_value=5.0, value=5.0, step=1.0, key="paper_per_trade_cap")
+    with risk_col3:
+        exposure_cap = st.number_input("Maximum open exposure ($)", min_value=1.0, max_value=10.0, value=10.0, step=1.0, key="paper_exposure_cap")
+
+    positions = pd.read_sql_query("SELECT * FROM paper_positions ORDER BY id DESC", conn)
+    today_utc = datetime.now(timezone.utc).date().isoformat()
+    today_opened = positions[positions["opened_utc"].astype(str).str.startswith(today_utc)] if not positions.empty else positions
+    daily_used = float(today_opened["stake"].sum()) if not today_opened.empty else 0.0
+    open_positions = positions[positions["status"] == "OPEN"] if not positions.empty else positions
+    open_exposure = float(open_positions["stake"].sum()) if not open_positions.empty else 0.0
+    met1, met2, met3, met4 = st.columns(4)
+    met1.metric("Paper stake used today (UTC)", f"${daily_used:.2f} / ${daily_cap:.2f}")
+    met2.metric("Open paper exposure", f"${open_exposure:.2f} / ${exposure_cap:.2f}")
+    met3.metric("Open positions", f"{len(open_positions)}")
+    closed_positions = positions[positions["status"] == "CLOSED"] if not positions.empty else positions
+    total_pnl = float(pd.to_numeric(closed_positions["realized_pnl"], errors="coerce").fillna(0).sum()) if not closed_positions.empty else 0.0
+    met4.metric("Simulated realized P/L", f"${total_pnl:+.2f}")
+
+    st.markdown("### Open a simulated position")
+    candidate_frame = pd.DataFrame(st.session_state.get("best_bet_rows", []))
+    if candidate_frame.empty:
+        st.info("No safely matched model candidates are available right now. No paper entry is suggested. Check the Market Scanner and Sports Predictions tabs; do not substitute a moonshot market-only row as a model pick.")
+    else:
+        candidate_frame = candidate_frame.copy()
+        candidate_frame["Model minus market"] = pd.to_numeric(candidate_frame.get("Model minus market"), errors="coerce")
+        candidate_frame["Market probability"] = pd.to_numeric(candidate_frame.get("Market probability"), errors="coerce")
+        candidate_frame["Model probability"] = pd.to_numeric(candidate_frame.get("Model probability"), errors="coerce")
+        candidate_frame = candidate_frame[candidate_frame["Model minus market"] >= 0.05]
+        if candidate_frame.empty:
+            st.info("Candidates exist, but none meet the minimum 5 percentage-point edge used for this paper-trading shortlist.")
+        else:
+            candidate_frame = candidate_frame.reset_index(drop=True)
+            candidate_labels = [f"{r.get('Team','?')} · {r.get('Matchup','?')} · price {float(r.get('Market probability', 0)):.1%} · edge {float(r.get('Model minus market', 0)):+.1%}" for _, r in candidate_frame.iterrows()]
+            selected_idx = st.selectbox("Choose a model-matched candidate", range(len(candidate_labels)), format_func=lambda i: candidate_labels[i], key="paper_candidate_select")
+            selected = candidate_frame.iloc[int(selected_idx)]
+            default_price = float(selected.get("Market probability", 0) or 0)
+            stake = st.number_input("Paper stake ($)", min_value=1.0, max_value=float(min(5.0, daily_cap)), value=float(min(5.0, daily_cap)), step=1.0, key="paper_entry_stake")
+            st.caption(f"Entry is simulated at the displayed market price ({default_price:.1%}); actual fills, fees, spreads, and slippage are not simulated.")
+            if st.button("Record paper entry", type="primary", key="paper_open_position"):
+                existing_daily = float(today_opened["stake"].sum()) if not today_opened.empty else 0.0
+                existing_exposure = float(open_positions["stake"].sum()) if not open_positions.empty else 0.0
+                url = str(selected.get("Review market", selected.get("URL", "")) or "")
+                market = str(selected.get("Market", ""))
+                outcome = str(selected.get("Outcome", ""))
+                market_key = f"{url}|{outcome}"
+                already_open = (not open_positions.empty) and ((open_positions["market_key"] == market_key).any())
+                if not (0 < default_price < 1):
+                    st.error("Market price is invalid; entry blocked.")
+                elif stake > per_trade_cap:
+                    st.error(f"Entry blocked: stake exceeds the per-entry cap of ${per_trade_cap:.2f}.")
+                elif existing_daily + stake > daily_cap:
+                    st.error(f"Entry blocked: this would exceed the daily cap of ${daily_cap:.2f}.")
+                elif existing_exposure + stake > exposure_cap:
+                    st.error(f"Entry blocked: this would exceed open exposure cap of ${exposure_cap:.2f}.")
+                elif already_open:
+                    st.error("Entry blocked: this market/outcome already has an open paper position.")
+                else:
+                    opened = datetime.now(timezone.utc).isoformat()
+                    cur = conn.execute("""INSERT INTO paper_positions
+                        (opened_utc, market_key, sport_event, market, outcome, url, entry_price, stake, shares, model_probability, entry_edge, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')""",
+                        (opened, market_key, str(selected.get("Matchup", selected.get("Sport", "Sports"))), market, outcome, url, default_price, float(stake), float(stake)/default_price, float(selected.get("Model probability", 0) or 0), float(selected.get("Model minus market", 0) or 0)))
+                    conn.commit()
+                    paper_audit(conn, "PAPER_ENTRY", cur.lastrowid, {"market_key": market_key, "stake": float(stake), "entry_price": default_price, "model_probability": float(selected.get("Model probability", 0) or 0), "edge": float(selected.get("Model minus market", 0) or 0), "note": "simulated only; no real order"})
+                    st.success("Paper position recorded. No real order was sent.")
+                    st.rerun()
+
+    st.markdown("### Open positions & exit review")
+    positions = pd.read_sql_query("SELECT * FROM paper_positions ORDER BY id DESC", conn)
+    open_positions = positions[positions["status"] == "OPEN"] if not positions.empty else positions
+    if open_positions.empty:
+        st.info("There are no open paper positions.")
+    else:
+        display_open = open_positions[["id", "opened_utc", "sport_event", "market", "outcome", "entry_price", "stake", "shares", "entry_edge"]].copy()
+        st.dataframe(dark_table(display_open), use_container_width=True, hide_index=True)
+        for _, pos in open_positions.iterrows():
+            current_price = None
+            current_df = locals().get("df")
+            if isinstance(current_df, pd.DataFrame) and not current_df.empty and "URL" in current_df and "Market price" in current_df:
+                matches = current_df[(current_df["URL"].astype(str) == str(pos["url"])) & (current_df["Outcome"].astype(str) == str(pos["outcome"]))]
+                if not matches.empty:
+                    current_price = float(pd.to_numeric(matches.iloc[0]["Market price"], errors="coerce"))
+            price_text = f"Current displayed price: {current_price:.1%}" if current_price is not None and pd.notna(current_price) else "Current displayed price unavailable in this refresh."
+            st.write(f"**Position #{int(pos['id'])}:** {pos['sport_event']} · {pos['outcome']} — {price_text}")
+            if current_price is not None and pd.notna(current_price):
+                move = current_price - float(pos["entry_price"])
+                st.caption(f"Price change since entry: {move:+.1%}. This is a mark-to-market signal only, not a prediction that the price will continue moving.")
+                if move <= -0.05:
+                    st.warning("Review signal: price has fallen by at least 5 percentage points since entry. This does not automatically close the position.")
+                elif move >= 0.10:
+                    st.info("Review signal: price has risen by at least 10 percentage points since entry. Consider your exit rules; this does not automatically close the position.")
+            close_cols = st.columns([1, 2])
+            with close_cols[0]:
+                if st.button(f"Close paper position #{int(pos['id'])}", key=f"paper_close_{int(pos['id'])}"):
+                    if current_price is None or pd.isna(current_price) or not (0 <= current_price <= 1):
+                        st.error("Cannot close yet: current market price was not found. Refresh and verify the market.")
+                    else:
+                        pnl = float(pos["shares"]) * current_price - float(pos["stake"])
+                        closed = datetime.now(timezone.utc).isoformat()
+                        conn.execute("UPDATE paper_positions SET status='CLOSED', closed_utc=?, exit_price=?, realized_pnl=? WHERE id=? AND status='OPEN'", (closed, current_price, pnl, int(pos["id"])))
+                        conn.commit()
+                        paper_audit(conn, "PAPER_EXIT", int(pos["id"]), {"exit_price": current_price, "realized_pnl": pnl, "note": "simulated close only; no real order"})
+                        st.success(f"Paper position closed. Simulated P/L: ${pnl:+.2f}. No real order was sent.")
+                        st.rerun()
+
+    st.markdown("### Audit log")
+    audit = pd.read_sql_query("SELECT created_utc, action, position_id, details FROM paper_audit ORDER BY id DESC LIMIT 100", conn)
+    if audit.empty:
+        st.info("No paper-trading actions logged yet.")
+    else:
+        st.dataframe(dark_table(audit), use_container_width=True, hide_index=True, height=300)
+        st.download_button("Download paper audit CSV", data=audit.to_csv(index=False).encode("utf-8"), file_name="paper_audit_log.csv", mime="text/csv")
+    if not positions.empty:
+        st.download_button("Download paper positions CSV", data=positions.to_csv(index=False).encode("utf-8"), file_name="paper_positions.csv", mime="text/csv")
+    st.warning("Risk controls currently cap simulated entries only. Exit signals are advisory and require a manual paper close. SQLite records can be lost on Streamlit Cloud restart/redeploy; download the CSVs regularly. Before any real-money automation, add external persistent storage, calibrated/backtested probabilities, API authentication/security, idempotent order handling, and a kill switch. Real execution is not implemented.")
+
 st.divider()
-st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete and do not change probabilities; possible market matches are heuristic and require manual verification; no independent backtest. No automatic betting is performed.")
+st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete and do not change probabilities; possible market matches are heuristic and require manual verification; no independent backtest. No automatic betting is performed. Paper trading is simulated only; no real orders are sent.")
