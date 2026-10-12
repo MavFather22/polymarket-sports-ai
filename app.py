@@ -1,7 +1,8 @@
 import json
+import math
 import os
-import re
-from datetime import datetime, timezone
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
 import requests
@@ -9,33 +10,51 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 GAMMA = "https://gamma-api.polymarket.com"
+DB_PATH = "prediction_history.db"
+ESPN_SPORTS = {
+    "NFL": ("football", "nfl"),
+    "NBA": ("basketball", "nba"),
+    "WNBA": ("basketball", "wnba"),
+    "MLB": ("baseball", "mlb"),
+    "NHL": ("hockey", "nhl"),
+    "NCAA Football": ("football", "college-football"),
+    "NCAA Basketball": ("basketball", "mens-college-basketball"),
+    "MLS": ("soccer", "usa.1"),
+    "English Premier League": ("soccer", "eng.1"),
+    "La Liga": ("soccer", "esp.1"),
+}
 SPORT_WORDS = {
     "nfl", "nba", "wnba", "mlb", "nhl", "ufc", "mma", "soccer", "football",
     "basketball", "baseball", "hockey", "tennis", "golf", "cricket", "rugby",
     "formula 1", "f1", "nascar", "boxing", "esports", "champions league",
     "premier league", "world cup", "olympics", "ncaa", "college football",
     "college basketball", "racing", "pga", "atp", "wta", "liga", "la liga",
-    "serie a", "bundesliga", "nhl", "wnba", "futures", "match winner"
+    "serie a", "bundesliga", "match winner"
 }
 
 st.set_page_config(page_title="Polymarket Sports Scout", page_icon="🏟️", layout="wide")
-
 st.title("🏟️ Polymarket Sports Scout")
-st.caption("A starter research dashboard — not financial advice and not a guarantee of profitable bets.")
+st.caption("Research dashboard with a basic Elo model and prediction tracking. Not financial advice.")
 
-with st.sidebar:
-    st.header("Scanner settings")
-    refresh_seconds = st.selectbox("Refresh while this page is open", [30, 60, 120, 300], index=1)
-    min_liquidity = st.number_input("Minimum listed liquidity ($)", min_value=0, value=100, step=50)
-    max_price = st.slider("Watch outcomes priced at or below", 0.01, 0.99, 0.40, 0.01)
-    only_watchlist = st.checkbox("Show only price-alert candidates", value=False)
-    st.divider()
-    st.subheader("Optional Telegram alerts")
-    st.caption("Add TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as Streamlit secrets. Alerts are checked only while this app is running/refreshing.")
-    telegram_enabled = st.checkbox("Enable Telegram alerts", value=False)
-    st.caption("Never put bot tokens in code or a public GitHub repository.")
-
-st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
+def db_connect():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_utc TEXT NOT NULL,
+            sport TEXT NOT NULL,
+            matchup TEXT NOT NULL,
+            pick TEXT NOT NULL,
+            model_probability REAL NOT NULL,
+            opponent_probability REAL NOT NULL,
+            event_date TEXT,
+            event_id TEXT UNIQUE,
+            result TEXT,
+            notes TEXT
+        )
+    """)
+    conn.commit()
+    return conn
 
 def safe_json(value, fallback):
     if isinstance(value, (list, dict)):
@@ -48,18 +67,11 @@ def safe_json(value, fallback):
         return fallback
 
 def get_events():
-    """Starter scan: top 500 active events by 24-hour volume; not exhaustive."""
     response = requests.get(
         f"{GAMMA}/events",
-        params={
-            "active": "true",
-            "closed": "false",
-            "limit": 100,
-            "offset": 0,
-           
-        },
+        params={"active": "true", "closed": "false", "limit": 100, "offset": 0},
         timeout=20,
-        headers={"User-Agent": "PolymarketSportsScout/0.1"},
+        headers={"User-Agent": "PolymarketSportsScout/0.2"},
     )
     response.raise_for_status()
     data = response.json()
@@ -71,14 +83,12 @@ def event_looks_sporty(event):
     tags = event.get("tags") or []
     tag_text = " ".join(
         str(tag.get("label", "")) + " " + str(tag.get("slug", "")) + " " + str(tag.get("name", ""))
-        if isinstance(tag, dict) else str(tag)
-        for tag in tags
+        if isinstance(tag, dict) else str(tag) for tag in tags
     ).lower()
-    title = str(event.get("title", "")) + " " + str(event.get("slug", ""))
-    title = title.lower()
-    if any(word in tag_text for word in ("sport", "nfl", "nba", "mlb", "nhl", "soccer", "tennis", "ufc")):
-        return True
-    return any(word in title for word in SPORT_WORDS)
+    title = (str(event.get("title", "")) + " " + str(event.get("slug", ""))).lower()
+    return any(word in tag_text for word in ("sport", "nfl", "nba", "mlb", "nhl", "soccer", "tennis", "ufc")) or any(
+        word in title for word in SPORT_WORDS
+    )
 
 def flatten_events(events):
     rows = []
@@ -87,14 +97,11 @@ def flatten_events(events):
             continue
         event_title = event.get("title") or event.get("slug") or "Untitled event"
         event_slug = event.get("slug", "")
-        event_url = f"https://polymarket.com/event/{event_slug}" if event_slug else "https://polymarket.com"
         markets = event.get("markets") or []
         if isinstance(markets, str):
             markets = safe_json(markets, [])
         for market in markets:
-            if not isinstance(market, dict):
-                continue
-            if market.get("closed") is True or market.get("active") is False:
+            if not isinstance(market, dict) or market.get("closed") is True or market.get("active") is False:
                 continue
             question = market.get("question") or market.get("groupItemTitle") or event_title
             outcomes = safe_json(market.get("outcomes"), [])
@@ -102,42 +109,124 @@ def flatten_events(events):
             if not isinstance(outcomes, list) or not isinstance(prices, list):
                 continue
             slug = market.get("slug") or event_slug
-            url = f"https://polymarket.com/event/{slug}" if slug else event_url
+            url = f"https://polymarket.com/event/{slug}" if slug else "https://polymarket.com"
             try:
                 liquidity = float(market.get("liquidityNum", market.get("liquidity", 0)) or 0)
-            except (TypeError, ValueError):
-                liquidity = 0.0
-            try:
                 volume = float(market.get("volume24hr", market.get("volumeNum", 0)) or 0)
             except (TypeError, ValueError):
-                volume = 0.0
+                liquidity, volume = 0.0, 0.0
             for i, outcome in enumerate(outcomes):
                 try:
                     price = float(prices[i])
                 except (IndexError, TypeError, ValueError):
                     continue
-                if not (0 < price < 1):
-                    continue
-                rows.append({
-                    "Sport/event": event_title,
-                    "Market": question,
-                    "Outcome": str(outcome),
-                    "Market price": price,
-                    "Implied probability": price,
-                    "Liquidity ($)": liquidity,
-                    "24h volume ($)": volume,
-                    "URL": url,
-                })
+                if 0 < price < 1:
+                    rows.append({
+                        "Sport/event": event_title, "Market": question, "Outcome": str(outcome),
+                        "Market price": price, "Implied probability": price,
+                        "Liquidity ($)": liquidity, "24h volume ($)": volume, "URL": url,
+                    })
     df = pd.DataFrame(rows)
     if not df.empty:
         df = df.drop_duplicates(subset=["Market", "Outcome", "URL"])
     return df
 
+def espn_scoreboard(sport_name, day=None):
+    category, league = ESPN_SPORTS[sport_name]
+    params = {}
+    if day:
+        params["dates"] = day.strftime("%Y%m%d")
+    url = f"https://site.api.espn.com/apis/site/v2/sports/{category}/{league}/scoreboard"
+    response = requests.get(url, params=params, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    return response.json()
+
+def get_competitors(event):
+    competitions = event.get("competitions") or []
+    if not competitions:
+        return None
+    competitors = competitions[0].get("competitors") or []
+    if len(competitors) != 2:
+        return None
+    parsed = []
+    for item in competitors:
+        team = item.get("team") or {}
+        try:
+            score = float(item.get("score", 0) or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        parsed.append({
+            "name": team.get("displayName") or team.get("name") or "Unknown team",
+            "abbrev": team.get("abbreviation") or team.get("displayName") or "UNK",
+            "home_away": item.get("homeAway", ""),
+            "score": score,
+            "winner": item.get("winner", False),
+        })
+    return parsed
+
+def elo_expected(rating_a, rating_b, home_advantage=0):
+    return 1.0 / (1.0 + 10 ** ((rating_b - (rating_a + home_advantage)) / 400.0))
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def build_elo_ratings(sport_name, days_back=30):
+    """Build a simple Elo rating from completed ESPN scoreboard events in the last month."""
+    ratings = {}
+    games_used = 0
+    today = date.today()
+    # One request per day, cached for an hour. This is a starter model, not a full historical database.
+    for offset in range(days_back, 0, -1):
+        day = today - timedelta(days=offset)
+        try:
+            payload = espn_scoreboard(sport_name, day)
+        except requests.RequestException:
+            continue
+        for event in payload.get("events", []):
+            competitors = get_competitors(event)
+            if not competitors:
+                continue
+            status = ((event.get("status") or {}).get("type") or {}).get("completed", False)
+            if not status:
+                continue
+            a, b = competitors
+            if a["name"] == "Unknown team" or b["name"] == "Unknown team":
+                continue
+            ra, rb = ratings.get(a["name"], 1500.0), ratings.get(b["name"], 1500.0)
+            actual_a = 1.0 if a["score"] > b["score"] else 0.0 if a["score"] < b["score"] else 0.5
+            expected_a = elo_expected(ra, rb, 55 if a["home_away"] == "home" else -55 if b["home_away"] == "home" else 0)
+            # K=20 is a deliberately simple, conservative baseline.
+            ratings[a["name"]] = ra + 20 * (actual_a - expected_a)
+            ratings[b["name"]] = rb - 20 * (actual_a - expected_a)
+            games_used += 1
+    return ratings, games_used
+
+@st.cache_data(ttl=900, show_spinner=False)
+def get_upcoming_games(sport_name):
+    payload = espn_scoreboard(sport_name)
+    games = []
+    for event in payload.get("events", []):
+        competitors = get_competitors(event)
+        if not competitors:
+            continue
+        status_type = ((event.get("status") or {}).get("type") or {})
+        if status_type.get("completed", False):
+            continue
+        a, b = competitors
+        competition = (event.get("competitions") or [{}])[0]
+        games.append({
+            "id": str(event.get("id", "")),
+            "name": event.get("name", f"{a['name']} vs {b['name']}"),
+            "date": event.get("date", ""),
+            "a": a, "b": b,
+            "status": status_type.get("detail", status_type.get("description", "Scheduled")),
+            "venue": (competition.get("venue") or {}).get("fullName", ""),
+        })
+    return games
+
 def send_telegram(message):
     token = st.secrets.get("TELEGRAM_BOT_TOKEN", os.getenv("TELEGRAM_BOT_TOKEN", ""))
     chat_id = st.secrets.get("TELEGRAM_CHAT_ID", os.getenv("TELEGRAM_CHAT_ID", ""))
     if not token or not chat_id:
-        st.warning("Telegram is enabled, but TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID are not configured in app secrets.")
+        st.warning("Telegram is enabled, but its secrets are not configured.")
         return False
     response = requests.post(
         f"https://api.telegram.org/bot{token}/sendMessage",
@@ -147,91 +236,170 @@ def send_telegram(message):
     response.raise_for_status()
     return True
 
-try:
-    with st.spinner("Loading active Polymarket events…"):
-        events = get_events()
-        df = flatten_events(events)
-except requests.RequestException as exc:
-    st.error(f"Could not load Polymarket data: {exc}")
-    st.info("Try refreshing in a minute. Public APIs can rate-limit or temporarily fail.")
-    st.stop()
-except Exception as exc:
-    st.error(f"Unexpected data issue: {exc}")
-    st.stop()
+with st.sidebar:
+    st.header("Scanner settings")
+    refresh_seconds = st.selectbox("Refresh while this page is open", [60, 120, 300], index=1)
+    min_liquidity = st.number_input("Minimum listed liquidity ($)", min_value=0, value=100, step=50)
+    max_price = st.slider("Watch outcomes priced at or below", 0.01, 0.99, 0.40, 0.01)
+    only_watchlist = st.checkbox("Show only price-alert candidates", value=False)
+    st.divider()
+    st.subheader("Prediction engine")
+    selected_sports = st.multiselect("Sports to model", list(ESPN_SPORTS.keys()), default=["NFL", "NBA", "MLB", "NHL"])
+    days_back = st.select_slider("Recent results used for ratings", options=[7, 14, 21, 30], value=14)
+    st.caption("Uses public ESPN scoreboard data and a basic Elo model. Coverage depends on ESPN schedules.")
+    telegram_enabled = st.checkbox("Enable Telegram price alerts", value=False)
 
-if df.empty:
-    st.warning("No sports-looking markets were found in this page of results. The starter scans only the top 500 active events, so it can miss sports markets.")
-    st.stop()
+st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
+conn = db_connect()
 
-df["Price alert candidate"] = (df["Market price"] <= max_price) & (df["Liquidity ($)"] >= min_liquidity)
-candidates = df[df["Price alert candidate"]].copy()
-display_df = candidates if only_watchlist else df
-display_df = display_df.sort_values(["24h volume ($)", "Liquidity ($)"], ascending=False)
+tab_market, tab_model, tab_history = st.tabs(["Market scanner", "Sports predictions", "Prediction tracking"])
 
-m1, m2, m3 = st.columns(3)
-m1.metric("Sports outcome rows found", f"{len(df):,}")
-m2.metric("Price-alert candidates", f"{len(candidates):,}")
-m3.metric("Markets/events scanned", f"{len(events):,}")
+with tab_market:
+    try:
+        with st.spinner("Loading Polymarket markets…"):
+            events = get_events()
+            df = flatten_events(events)
+    except requests.RequestException as exc:
+        st.error(f"Could not load Polymarket data: {exc}")
+        df = pd.DataFrame()
+        events = []
+    if df.empty:
+        st.warning("No sports-looking markets were found in this page of results, or the API is temporarily unavailable.")
+    else:
+        df["Price alert candidate"] = (df["Market price"] <= max_price) & (df["Liquidity ($)"] >= min_liquidity)
+        candidates = df[df["Price alert candidate"]].copy()
+        display_df = candidates if only_watchlist else df
+        display_df = display_df.sort_values(["24h volume ($)", "Liquidity ($)"], ascending=False)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Sports outcome rows found", f"{len(df):,}")
+        m2.metric("Price-alert candidates", f"{len(candidates):,}")
+        m3.metric("Events scanned", f"{len(events):,}")
+        st.info("A low price is not proof of value. Model probabilities appear in the Sports predictions tab for ESPN-listed matchups; they are not automatically matched to Polymarket markets.")
+        view = display_df.copy()
+        view["Market price"] = view["Market price"].map(lambda x: f"${x:.3f}")
+        view["Implied probability"] = view["Implied probability"].map(lambda x: f"{x:.1%}")
+        view["Liquidity ($)"] = view["Liquidity ($)"].map(lambda x: f"${x:,.0f}")
+        view["24h volume ($)"] = view["24h volume ($)"].map(lambda x: f"${x:,.0f}")
+        st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
+                     use_container_width=True, hide_index=True,
+                     column_config={"URL": st.column_config.LinkColumn("Open market", display_text="View on Polymarket")})
+        st.download_button("Download market scan CSV", data=df.to_csv(index=False).encode("utf-8"),
+                           file_name="polymarket_sports_markets.csv", mime="text/csv")
+        if telegram_enabled and not candidates.empty:
+            if "sent_alerts" not in st.session_state:
+                st.session_state.sent_alerts = set()
+            for _, row in candidates.head(10).iterrows():
+                key = f"{row['URL']}|{row['Outcome']}|{row['Market price']:.4f}"
+                if key not in st.session_state.sent_alerts:
+                    msg = f"Polymarket price alert (research only)\n{row['Sport/event']}\n{row['Market']}\nOutcome: {row['Outcome']}\nPrice: ${row['Market price']:.3f}\n{row['URL']}"
+                    try:
+                        if send_telegram(msg):
+                            st.session_state.sent_alerts.add(key)
+                    except requests.RequestException as exc:
+                        st.warning(f"Telegram send failed: {exc}")
 
-st.warning(
-    "Important: a low price is not proof of value. This starter does not yet estimate true probabilities from independent sports statistics. "
-    "It flags prices for review; it does not claim these are profitable bets."
-)
+with tab_model:
+    st.subheader("Elo-based matchup estimates")
+    st.caption("Elo estimates relative team strength from recent completed games. It is a baseline—not a fully validated betting model, and a short history can be misleading.")
+    if not selected_sports:
+        st.info("Choose at least one sport in the sidebar.")
+    else:
+        for sport_name in selected_sports:
+            with st.expander(sport_name, expanded=(sport_name == selected_sports[0])):
+                try:
+                    with st.spinner(f"Building {sport_name} ratings from recent scores…"):
+                        ratings, games_used = build_elo_ratings(sport_name, days_back)
+                        games = get_upcoming_games(sport_name)
+                    st.caption(f"Completed games used in recent window: {games_used}. Teams rated: {len(ratings)}.")
+                    if not games:
+                        st.info("No upcoming or in-progress matchups were returned by the scoreboard right now.")
+                        continue
+                    rows = []
+                    for game in games:
+                        a, b = game["a"], game["b"]
+                        ra, rb = ratings.get(a["name"], 1500.0), ratings.get(b["name"], 1500.0)
+                        home = 55 if a["home_away"] == "home" else -55 if b["home_away"] == "home" else 0
+                        pa = elo_expected(ra, rb, home)
+                        rows.append({
+                            "Event ID": game["id"], "Sport": sport_name, "Matchup": game["name"],
+                            "Team A": a["name"], "Team B": b["name"],
+                            "Team A Elo": round(ra), "Team B Elo": round(rb),
+                            "Team A win probability": pa, "Team B win probability": 1 - pa,
+                            "Start": game["date"], "Status": game["status"],
+                        })
+                    pred_df = pd.DataFrame(rows)
+                    pretty = pred_df.copy()
+                    pretty["Team A win probability"] = pretty["Team A win probability"].map(lambda x: f"{x:.1%}")
+                    pretty["Team B win probability"] = pretty["Team B win probability"].map(lambda x: f"{x:.1%}")
+                    st.dataframe(pretty[["Matchup", "Team A Elo", "Team B Elo", "Team A win probability", "Team B win probability", "Start", "Status"]],
+                                 use_container_width=True, hide_index=True)
+                    save_choice = st.selectbox(f"Choose a matchup to record ({sport_name})",
+                                               options=list(range(len(rows))),
+                                               format_func=lambda i: rows[i]["Matchup"],
+                                               key=f"save_choice_{sport_name}")
+                    chosen = rows[save_choice]
+                    pick_side = st.radio(f"Record which side? ({sport_name})",
+                                         [chosen["Team A"], chosen["Team B"]],
+                                         horizontal=True, key=f"pick_side_{sport_name}")
+                    note = st.text_input(f"Optional note ({sport_name})", key=f"note_{sport_name}")
+                    if st.button(f"Save prediction ({sport_name})", key=f"save_{sport_name}"):
+                        pick_prob = chosen["Team A win probability"] if pick_side == chosen["Team A"] else chosen["Team B win probability"]
+                        opp_prob = 1 - pick_prob
+                        event_date = chosen["Start"]
+                        event_id = f"{sport_name}:{chosen['Event ID']}:{pick_side}"
+                        try:
+                            conn.execute(
+                                "INSERT INTO predictions (created_utc,sport,matchup,pick,model_probability,opponent_probability,event_date,event_id,result,notes) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                (datetime.now(timezone.utc).isoformat(), sport_name, chosen["Matchup"], pick_side,
+                                 float(pick_prob), float(opp_prob), event_date, event_id, None, note)
+                            )
+                            conn.commit()
+                            st.success("Prediction saved to this app's local database.")
+                        except sqlite3.IntegrityError:
+                            st.warning("That same team/matchup prediction is already recorded.")
+                except requests.RequestException as exc:
+                    st.warning(f"Could not load ESPN data for {sport_name}: {exc}")
+                except Exception as exc:
+                    st.warning(f"Couldn't build {sport_name} predictions: {exc}")
 
-st.subheader("Market scanner")
-st.caption(f"Last refreshed: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-view = display_df.copy()
-view["Market price"] = view["Market price"].map(lambda x: f"${x:.3f}")
-view["Implied probability"] = view["Implied probability"].map(lambda x: f"{x:.1%}")
-view["Liquidity ($)"] = view["Liquidity ($)"].map(lambda x: f"${x:,.0f}")
-view["24h volume ($)"] = view["24h volume ($)"].map(lambda x: f"${x:,.0f}")
-st.dataframe(
-    view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
-    use_container_width=True,
-    hide_index=True,
-    column_config={"URL": st.column_config.LinkColumn("Open market", display_text="View on Polymarket")},
-)
+with tab_history:
+    st.subheader("Prediction history and accuracy")
+    history = pd.read_sql_query("SELECT * FROM predictions ORDER BY id DESC", conn)
+    if history.empty:
+        st.info("No predictions recorded yet. Go to Sports predictions and save one.")
+    else:
+        c1, c2, c3 = st.columns(3)
+        settled = history[history["result"].isin(["Win", "Loss"])]
+        c1.metric("Predictions saved", len(history))
+        c2.metric("Settled predictions", len(settled))
+        c3.metric("Accuracy on settled picks", f"{(settled['result'].eq('Win').mean() * 100):.1f}%" if not settled.empty else "Not yet available")
+        st.caption("Accuracy is only calculated after you manually enter results. This avoids pretending an unverified outcome was settled.")
+        edited = st.data_editor(
+            history[["id", "created_utc", "sport", "matchup", "pick", "model_probability", "event_date", "result", "notes"]],
+            use_container_width=True, hide_index=True, disabled=["id", "created_utc", "sport", "matchup", "pick", "model_probability", "event_date"],
+            column_config={
+                "result": st.column_config.SelectboxColumn("Result", options=["Pending", "Win", "Loss", "Void"], required=True),
+                "model_probability": st.column_config.NumberColumn("Model probability", format="%.1%%"),
+            },
+            key="history_editor"
+        )
+        if st.button("Save result updates"):
+            for _, row in edited.iterrows():
+                result = row["result"]
+                if result == "Pending":
+                    result = None
+                conn.execute("UPDATE predictions SET result=?, notes=? WHERE id=?", (result, row["notes"], int(row["id"])))
+            conn.commit()
+            st.success("Results updated.")
+            st.rerun()
+        if not settled.empty:
+            scored = settled.copy()
+            scored["actual"] = scored["result"].map({"Win": 1.0, "Loss": 0.0})
+            scored["brier_component"] = (scored["model_probability"] - scored["actual"]) ** 2
+            st.metric("Brier score (lower is better)", f"{scored['brier_component'].mean():.3f}")
+        st.download_button("Download prediction history CSV", data=history.to_csv(index=False).encode("utf-8"),
+                           file_name="prediction_history.csv", mime="text/csv")
+        st.warning("Important: Streamlit Community Cloud's local files may be reset when the app restarts or redeploys. Download your history CSV regularly; a persistent database can be added later.")
 
-st.download_button(
-    "Download results as CSV",
-    data=df.to_csv(index=False).encode("utf-8"),
-    file_name="polymarket_sports_markets.csv",
-    mime="text/csv",
-)
-
-st.subheader("Price alerts")
-st.write(f"Currently {len(candidates)} outcome(s) meet your selected price and liquidity filters.")
-if telegram_enabled and not candidates.empty:
-    # Session-level cooldown prevents the same alert from repeating on every refresh
-    # during this browser session. A production alert worker should use persistent storage.
-    if "sent_alerts" not in st.session_state:
-        st.session_state.sent_alerts = set()
-    for _, row in candidates.head(10).iterrows():
-        key = f"{row['URL']}|{row['Outcome']}|{row['Market price']:.4f}"
-        if key not in st.session_state.sent_alerts:
-            message = (
-                f"Polymarket price alert (not a bet recommendation)\n"
-                f"{row['Sport/event']}\n{row['Market']}\n"
-                f"Outcome: {row['Outcome']}\nPrice: ${row['Market price']:.3f}\n"
-                f"Liquidity: ${row['Liquidity ($)']:,.0f}\n{row['URL']}"
-            )
-            try:
-                if send_telegram(message):
-                    st.session_state.sent_alerts.add(key)
-            except requests.RequestException as exc:
-                st.warning(f"Telegram send failed: {exc}")
-
-with st.expander("What this first version does and does not do"):
-    st.markdown(
-        """
-        **Does:** reads public Polymarket event data, filters likely sports events, displays outcome prices and market activity,
-        and flags outcomes matching your price/liquidity filters.
-
-        **Does not yet:** cover every sports market, predict player statistics, calculate a trustworthy independent probability,
-        understand every settlement rule, or send guaranteed background alerts when the app is asleep.
-
-        **Next upgrade:** use Polymarket's sports metadata/series and tags for broader coverage; connect a reliable sports statistics
-        source; build and backtest probability models; store alert history in a database; run a scheduled background checker for
-        Telegram alerts even when the dashboard is closed.
-        """
-    )
+st.divider()
+st.caption("Model limitations: short recent-results window, no injuries/rosters/starting pitchers/goalies, no player-level predictions, no independent backtest yet, and no automatic matching to Polymarket contracts. No automatic betting is performed.")
