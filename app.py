@@ -109,26 +109,81 @@ def safe_json(value, fallback):
 
 @st.cache_data(ttl=120, show_spinner=False)
 def get_events():
-    """Scan several pages so sports markets aren't missed just because they rank below page one."""
+    """Fetch sports events directly by sport tags, then use a broad fallback if needed."""
     collected = []
-    page_size = 100
-    max_pages = 5  # Up to 500 active events; kept bounded to avoid excessive API calls.
-    for page in range(max_pages):
-        response = requests.get(
-            f"{GAMMA}/events",
-            params={"active": "true", "closed": "false", "limit": page_size, "offset": page * page_size},
-            timeout=20,
-            headers={"User-Agent": "PolymarketSportsScout/0.3"},
-        )
-        response.raise_for_status()
-        data = response.json()
-        if isinstance(data, dict):
-            data = data.get("data", data.get("events", []))
-        if not isinstance(data, list) or not data:
-            break
-        collected.extend(data)
-        if len(data) < page_size:
-            break
+    seen = set()
+    headers = {"User-Agent": "PolymarketSportsScout/0.4"}
+
+    # The general /events feed is dominated by non-sports markets, so querying
+    # only its first few pages can miss sports entirely. Query sport tags first.
+    sport_tags = [
+        "sports", "nfl", "nba", "wnba", "mlb", "nhl", "soccer", "tennis",
+        "ufc", "mma", "golf", "ncaa", "college-football",
+        "college-basketball", "premier-league", "champions-league",
+    ]
+    for tag in sport_tags:
+        try:
+            response = requests.get(
+                f"{GAMMA}/events",
+                params={
+                    "active": "true",
+                    "closed": "false",
+                    "tag_slug": tag,
+                    "limit": 100,
+                    "offset": 0,
+                },
+                timeout=15,
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                data = data.get("data", data.get("events", []))
+            if not isinstance(data, list):
+                continue
+            for event in data:
+                if not isinstance(event, dict):
+                    continue
+                event_id = str(event.get("id") or event.get("slug") or event.get("title") or "")
+                if event_id and event_id not in seen:
+                    seen.add(event_id)
+                    collected.append(event)
+        except (requests.RequestException, ValueError):
+            # One tag can fail without preventing the remaining sports feeds.
+            continue
+
+    # Fallback to a few general pages if sport-tag queries return nothing.
+    if not collected:
+        for offset in (0, 100, 200, 300, 400):
+            try:
+                response = requests.get(
+                    f"{GAMMA}/events",
+                    params={
+                        "active": "true",
+                        "closed": "false",
+                        "limit": 100,
+                        "offset": offset,
+                    },
+                    timeout=15,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                if isinstance(data, dict):
+                    data = data.get("data", data.get("events", []))
+                if not isinstance(data, list) or not data:
+                    break
+                for event in data:
+                    if not isinstance(event, dict):
+                        continue
+                    event_id = str(event.get("id") or event.get("slug") or event.get("title") or "")
+                    if event_id and event_id not in seen:
+                        seen.add(event_id)
+                        collected.append(event)
+                if len(data) < 100:
+                    break
+            except (requests.RequestException, ValueError):
+                break
     return collected
 
 def event_looks_sporty(event):
