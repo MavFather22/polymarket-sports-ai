@@ -1,3 +1,18 @@
+None selected 
+
+Skip to content
+Using Gmail with screen readers
+1 of 5,429
+app
+Inbox
+
+Maverick Whitfield <maverickwhit2@gmail.com>
+Attachments
+11:09 PM (0 minutes ago)
+to me
+
+ One attachment
+  •  Scanned by Gmail
 import json
 import math
 import os
@@ -167,6 +182,117 @@ def get_competitors(event):
 def elo_expected(rating_a, rating_b, home_advantage=0):
     return 1.0 / (1.0 + 10 ** ((rating_b - (rating_a + home_advantage)) / 400.0))
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_espn_feed(sport_name, feed_type):
+    """Fetch public ESPN league-wide injuries or news; these endpoints are undocumented and may change."""
+    category, league = ESPN_SPORTS[sport_name]
+    if feed_type == "injuries":
+        endpoint = f"https://site.api.espn.com/apis/site/v2/sports/{category}/{league}/injuries"
+    else:
+        endpoint = f"https://site.api.espn.com/apis/site/v2/sports/{category}/{league}/news"
+    response = requests.get(endpoint, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    return response.json()
+
+def extract_news_items(payload):
+    items = payload.get("articles") or payload.get("news") or []
+    cleaned = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        headline = item.get("headline") or item.get("title") or "Untitled report"
+        description = item.get("description") or item.get("summary") or item.get("story") or ""
+        published = item.get("published") or item.get("lastModified") or item.get("date") or ""
+        links = item.get("links") or {}
+        web_link = links.get("web") or {}
+        href = web_link.get("href") if isinstance(web_link, dict) else ""
+        cleaned.append({"headline": headline, "description": description, "published": published, "url": href})
+    return cleaned
+
+def extract_injury_items(payload):
+    """Normalize common ESPN injury payload shapes without assuming every league matches."""
+    groups = payload.get("injuries") or payload.get("items") or []
+    cleaned = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        team = group.get("team") or {}
+        team_name = team.get("displayName") or team.get("name") or team.get("abbreviation") or ""
+        nested = group.get("injuries")
+        if not isinstance(nested, list):
+            nested = [group]
+        for item in nested:
+            if not isinstance(item, dict):
+                continue
+            athlete = item.get("athlete") or item.get("player") or {}
+            name = athlete.get("displayName") or athlete.get("fullName") or athlete.get("name") or item.get("displayName") or "Player not listed"
+            status = item.get("status") or item.get("type") or item.get("shortComment") or item.get("details") or "Status not provided"
+            if isinstance(status, dict):
+                status = status.get("description") or status.get("name") or str(status)
+            comment = item.get("longComment") or item.get("comment") or item.get("description") or ""
+            position = athlete.get("position") or {}
+            if isinstance(position, dict):
+                position = position.get("abbreviation") or position.get("name") or ""
+            cleaned.append({"Team": team_name, "Player": name, "Position": position, "Status": str(status), "Details": str(comment)})
+    return cleaned
+
+def sync_saved_results(conn):
+    """Check each saved pick against ESPN scoreboard data for its scheduled date ± one day."""
+    history = pd.read_sql_query(
+        "SELECT id, sport, pick, event_date, event_id, result FROM predictions WHERE result IS NULL OR result='Pending'",
+        conn,
+    )
+    updated = 0
+    checked = 0
+    for _, row in history.iterrows():
+        sport_name = row["sport"]
+        if sport_name not in ESPN_SPORTS:
+            continue
+        raw_id = str(row["event_id"] or "")
+        parts = raw_id.split(":", 2)
+        if len(parts) < 3:
+            continue
+        espn_id = parts[1]
+        try:
+            scheduled = pd.to_datetime(row["event_date"], utc=True).date()
+        except (TypeError, ValueError):
+            continue
+        found = None
+        for day in (scheduled - timedelta(days=1), scheduled, scheduled + timedelta(days=1)):
+            try:
+                payload = espn_scoreboard(sport_name, day)
+            except requests.RequestException:
+                continue
+            for event in payload.get("events", []):
+                if str(event.get("id", "")) == espn_id:
+                    found = event
+                    break
+            if found:
+                break
+        checked += 1
+        if not found:
+            continue
+        status_type = ((found.get("status") or {}).get("type") or {})
+        if not status_type.get("completed", False):
+            continue
+        competitors = get_competitors(found)
+        if not competitors:
+            continue
+        pick = str(row["pick"])
+        selected = next((team for team in competitors if team["name"] == pick), None)
+        if selected is None:
+            continue
+        other = next((team for team in competitors if team["name"] != pick), None)
+        if other is None or selected["score"] == other["score"]:
+            result = "Void"
+        else:
+            result = "Win" if selected["score"] > other["score"] else "Loss"
+        conn.execute("UPDATE predictions SET result=? WHERE id=?", (result, int(row["id"])))
+        updated += 1
+    conn.commit()
+    return updated, checked
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def build_elo_ratings(sport_name, days_back=30):
     """Build a simple Elo rating from completed ESPN scoreboard events in the last month."""
@@ -252,7 +378,7 @@ with st.sidebar:
 st_autorefresh(interval=refresh_seconds * 1000, key="market_refresh")
 conn = db_connect()
 
-tab_market, tab_model, tab_history = st.tabs(["Market scanner", "Sports predictions", "Prediction tracking"])
+tab_market, tab_model, tab_news, tab_history = st.tabs(["Market scanner", "Sports predictions", "News & injuries", "Prediction tracking"])
 
 with tab_market:
     try:
@@ -402,4 +528,6 @@ with tab_history:
         st.warning("Important: Streamlit Community Cloud's local files may be reset when the app restarts or redeploys. Download your history CSV regularly; a persistent database can be added later.")
 
 st.divider()
-st.caption("Model limitations: short recent-results window, no injuries/rosters/starting pitchers/goalies, no player-level predictions, no independent backtest yet, and no automatic matching to Polymarket contracts. No automatic betting is performed.")
+st.caption("Model limitations: recent-results Elo baseline; news/injury feeds may be incomplete; news is not yet used to change probabilities; no independent backtest yet; no automatic matching to Polymarket contracts. No automatic betting is performed.")
+app.py
+Displaying app.py. 
