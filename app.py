@@ -65,7 +65,17 @@ div[data-testid="stMetricLabel"] { color:#a7b8cc; font-size:.82rem; } div[data-t
 .stRadio label,.stCheckbox label,.stSlider label,.stSelectbox label,.stTextInput label,.stMultiSelect label { color:#d5e0ed !important; }
 .stTabs [data-baseweb="tab-list"] { flex-wrap:wrap; }
 
-[data-testid="stDataFrame"] { border:1px solid rgba(139,164,192,.2); border-radius:14px; overflow:hidden; }
+[data-testid="stDataFrame"], [data-testid="stTable"] { border:1px solid rgba(114,245,200,.22); border-radius:14px; overflow:hidden; background:#0e1725 !important; }
+[data-testid="stDataFrame"] iframe { color-scheme:dark; }
+[data-testid="stDataFrame"] [role="grid"], [data-testid="stDataFrame"] canvas { color-scheme:dark; }
+[data-testid="stAlert"] p { color:#e6eef8 !important; }
+[data-testid="stAlert"] a { color:#79f5d5 !important; }
+[data-testid="stAlert"] [data-testid="stMarkdownContainer"] { color:#e6eef8 !important; }
+.stNumberInput button, .stDateInput button, .stTimeInput button { color:#d9e7f6 !important; background:#172438 !important; border-color:#34445b !important; }
+.stSelectbox [data-baseweb="select"] { background:#111b2a !important; }
+div[data-baseweb="popover"] ul, div[data-baseweb="menu"] { background:#111b2a !important; }
+div[data-baseweb="popover"] li, div[data-baseweb="menu"] li { color:#edf4fc !important; }
+[data-testid="stDataFrame"] [data-testid="glideDataEditor"] { background:#0e1725 !important; }
 .matchup-card { background:linear-gradient(145deg,rgba(21,31,47,.98),rgba(11,17,28,.98)); border:1px solid rgba(128,153,183,.2); border-radius:17px; padding:1.05rem; margin:.25rem 0 .75rem; box-shadow:0 10px 26px rgba(0,0,0,.14); }
 .matchup-name { color:#f4f7ff; font-weight:850; font-size:1.03rem; } .matchup-meta { color:#92a6bc; font-size:.78rem; margin-top:.35rem; }
 div[data-testid="stAlert"] { border-radius:13px; }
@@ -198,14 +208,14 @@ def event_looks_sporty(event):
     )
 
 
-NON_GAME_TERMS = {"ballon d'or", "ballon dor", "mvp", "rookie of the year", "player of the year", "coach of the year", "award", "awards", "draft", "hall of fame", "top scorer", "golden boot", "most valuable player", "cy young", "heisman"}
+NON_GAME_TERMS = {"ballon d'or", "ballon dor", "mvp", "rookie of the year", "player of the year", "coach of the year", "award", "awards", "draft", "hall of fame", "top scorer", "golden boot", "most valuable player", "cy young", "heisman", "advance to", "reach the", "win the 20", "champion of the", "league phase", "most clean sheets", "most assists", "most goals", "finish with the best", "round of 16", "round of 32", "semifinal", "semi-final", "quarterfinal", "quarter-final", "to win the title", "season winner"}
 
 def is_game_market(row):
     text = f"{row.get('Sport/event','')} {row.get('Market','')}".casefold()
     if any(term in text for term in NON_GAME_TERMS):
         return False
     # Keep likely event-level markets; avoid generic futures and season-long awards.
-    game_terms = (" vs ", " at ", "winner", "win on", "beat", "spread", "total points", "over/under", "moneyline", "match", "game", "champions league", " vs.")
+    game_terms = (" vs ", " at ", "winner", "win on", "beat", "spread", "total points", "over/under", "moneyline", "match winner", "matchup", "fixture")
     return any(term in text for term in game_terms)
 
 def team_tokens(name):
@@ -669,7 +679,7 @@ with tab_market:
         st.dataframe(view[["Sport/event", "Market", "Outcome", "Market price", "Implied probability", "Liquidity ($)", "24h volume ($)", "Price alert candidate", "URL"]],
                      use_container_width=True, hide_index=True, height=480,
                      column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗"),
-                                    "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)})
+                                    "Price alert candidate": st.column_config.CheckboxColumn("Price alert", disabled=True)}, theme="dark")
         st.download_button("Download market scan CSV", data=df.to_csv(index=False).encode("utf-8"),
                            file_name="polymarket_sports_markets.csv", mime="text/csv")
         if telegram_enabled and not candidates.empty:
@@ -747,7 +757,7 @@ with tab_game:
                     pulse_b.metric("Injury entries returned", len(pulse_injuries))
                     if pulse_injuries:
                         with st.expander("🩹 Availability watch", expanded=False):
-                            st.dataframe(pd.DataFrame(pulse_injuries).head(10), use_container_width=True, hide_index=True)
+                            st.dataframe(pd.DataFrame(pulse_injuries).head(10), use_container_width=True, hide_index=True, theme="dark")
                 except requests.RequestException:
                     pulse_b.metric("Injury entries returned", "Unavailable")
                 ordered = live_rows + upcoming_rows + final_rows
@@ -820,7 +830,7 @@ with tab_model:
                         edge_view = likely_edges.copy()
                         for col in ("Model probability", "Market probability", "Model minus market"):
                             edge_view[col] = edge_view[col].map(lambda x: f"{x:+.1%}" if col == "Model minus market" else f"{x:.1%}")
-                        st.dataframe(edge_view, use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")})
+                        st.dataframe(edge_view, use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify contract", display_text="Open ↗")}, theme="dark")
                     save_choice = st.selectbox(f"Choose a matchup to record ({sport_name})",
                                                options=list(range(len(rows))),
                                                format_func=lambda i: rows[i]["Matchup"],
@@ -857,7 +867,7 @@ with tab_best:
     st.caption("Only markets where both teams and the named contract outcome match the same fixture are considered. Ambiguous matches and season futures are excluded.")
     candidates = pd.DataFrame(st.session_state.get("best_bet_rows", []))
     if candidates.empty:
-        st.info("No likely model/market matches with at least a 5 percentage-point difference were found in the current scan. Open Sports predictions and wait for selected leagues to load, then revisit this tab.")
+        st.info("No confident matches passed the safety checks in this refresh. Common reasons: the market is a season future/player prop, the event title does not identify both teams, or the market question does not clearly name one side. This is preferable to showing a false edge. Check that upcoming fixtures appear in Sports predictions and that Market scanner is set to Game markets only.")
     else:
         candidates["Model minus market"] = pd.to_numeric(candidates["Model minus market"], errors="coerce")
         candidates["Model probability"] = pd.to_numeric(candidates["Model probability"], errors="coerce")
@@ -879,7 +889,7 @@ with tab_best:
             for col in ("Model probability", "Market probability"):
                 show[col] = show[col].map(lambda x: f"{x:.1%}")
             show["Model minus market"] = show["Model minus market"].map(lambda x: f"{x:+.1%}")
-            st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")})
+            st.dataframe(show[["Sport", "Matchup", "Team", "Model probability", "Market probability", "Model minus market", "Market", "Outcome", "Review market"]], use_container_width=True, hide_index=True, column_config={"Review market": st.column_config.LinkColumn("Verify market", display_text="Open ↗")}, theme="dark")
 
 with tab_moonshot:
     st.markdown('<div class="section-label">Long-shot research lab</div>', unsafe_allow_html=True)
@@ -945,7 +955,7 @@ with tab_moonshot:
                 view[col] = view[col].map(lambda x: "—" if pd.isna(x) else (f"{x:+.1%}" if col == "Model edge" else f"{x:.1%}"))
             for col in ("Liquidity ($)", "Potential total return ($)", "Potential profit ($)"):
                 view[col] = view[col].map(lambda x: f"${x:,.2f}")
-            st.dataframe(view, use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")})
+            st.dataframe(view, use_container_width=True, hide_index=True, height=520, column_config={"URL": st.column_config.LinkColumn("Open market", display_text="Open ↗")}, theme="dark")
             st.caption("Moonshot ranking is exploratory. Historical hit rates are not yet calculated from a sufficiently large, settled dataset; model matches are heuristic, and current Elo estimates do not account for injuries or all relevant context.")
             st.download_button("Download moonshot shortlist CSV", data=moon.to_csv(index=False).encode("utf-8"), file_name="moonshot_candidates.csv", mime="text/csv")
 
@@ -1034,7 +1044,7 @@ with tab_betbuilder:
                 moon_builder[["Sport/event", "Market", "Outcome", "Market price", "Market implied chance", "Break-even hit rate", "Potential return ($)", "Potential profit ($)", "Liquidity ($)", "URL"]],
                 use_container_width=True, hide_index=True, height=420,
                 column_config={"URL": st.column_config.LinkColumn("Verify market", display_text="Open ↗")}
-            )
+            , theme="dark")
             st.download_button("Download bet builder shortlist CSV", data=moon_builder.to_csv(index=False).encode("utf-8"), file_name="bet_builder_shortlist.csv", mime="text/csv", key="download_betbuilder")
             st.warning("Market-only moonshots are ranked by payout, not by validated likelihood. A market price is only the market-implied probability proxy; fees, spreads, liquidity and settlement rules can change realized returns. Never treat the displayed expected value as reliable until the model has been calibrated against a large out-of-sample history.")
 
@@ -1099,7 +1109,7 @@ with tab_news:
                     st.info("No injuries were returned in the expected format. This does not mean every player is healthy.")
                 else:
                     injury_df = pd.DataFrame(injury_items)
-                    st.dataframe(injury_df, use_container_width=True, hide_index=True, height=420)
+                    st.dataframe(injury_df, use_container_width=True, hide_index=True, height=420, theme="dark")
                     st.download_button("Download injury report CSV", data=injury_df.to_csv(index=False).encode("utf-8"), file_name=f"{news_sport.lower().replace(' ', '_')}_injuries.csv", mime="text/csv")
             except requests.RequestException as exc:
                 st.warning(f"Injury feed unavailable for {news_sport}: {exc}")
